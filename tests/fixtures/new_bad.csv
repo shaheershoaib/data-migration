@@ -1,0 +1,4 @@
+legacy_id,name,customer_id,amount,delivered_at,state
+101,Acme Ltd,1,100,,ACTIVE
+103,Wrong Name Co,2,300,,BOGUS_STATE
+104,Cirrus Co,3,not-a-number,,ACTIVE

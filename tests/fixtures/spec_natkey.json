@@ -1,0 +1,2 @@
+{"source": "legacy_bad.csv", "destination": "new_bad.csv",
+ "key": {"source": "code", "destination": "legacy_id"}}

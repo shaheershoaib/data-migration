@@ -1,0 +1,9 @@
+{"source": "legacy_conflict.csv", "destination": "new_conflict_resolved.csv",
+ "exclusivity": [{
+   "name": "a reversal beats a settle-flag - a bounced payment is not money received",
+   "key": {"source": "id", "destination": "legacy_id"},
+   "destination_column": "status",
+   "states": [
+     {"name": "reversed",       "when": {"payment_state": "REVERSED"}, "destination_value": "REVERSED"},
+     {"name": "settled", "when": {"is_settled": "1"},     "destination_value": "SETTLED"}
+   ]}]}

@@ -1,0 +1,12 @@
+{
+  "source": "legacy_ok.csv",
+  "destination": "new_ok.csv",
+  "key": {"source": "id", "destination": "legacy_id",
+          "identity": {"source": "name", "destination": "name"}},
+  "columns": {"mapped": {"id": "legacy_id", "name": "name", "customer_id": "customer_id",
+                         "amount": "amount", "state": "state"}},
+  "grain": {"source_parent": "customer_id", "destination_parent": "customer_id"},
+  "contract": {"amount": {"type": "number", "required": true},
+               "state": {"type": "enum", "values": ["ACTIVE", "INACTIVE"]}},
+  "provenance": [{"artifact": "grouping.csv", "dated": "2026-06-02", "data_extracted": "2026-06-01"}]
+}

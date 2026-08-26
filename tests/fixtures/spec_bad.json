@@ -1,0 +1,17 @@
+{
+  "source": "legacy_bad.csv",
+  "destination": "new_bad.csv",
+  "key": {"source": "id", "destination": "legacy_id",
+          "identity": {"source": "name", "destination": "name"}},
+  "columns": {"mapped": {"id": "legacy_id", "name": "name", "customer_id": "customer_id",
+                         "amount": "amount"},
+              "dropped": ["is_paid"]},
+  "grain": {"source_parent": "customer_id", "destination_parent": "customer_id"},
+  "contract": {"amount": {"type": "number", "required": true},
+               "delivered_at": {"type": "date", "required": true},
+               "state": {"type": "enum", "values": ["ACTIVE", "INACTIVE"]}},
+  "counterexamples": [{"name": "is_paid really means paid?",
+                       "source_when": {"is_paid": "1"},
+                       "contradicted_by": {"status": ["FAILED", "REVERSED"]}}],
+  "provenance": [{"artifact": "grouping.csv", "dated": "2026-01-15", "data_extracted": "2026-06-01"}]
+}

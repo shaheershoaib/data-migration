@@ -1,0 +1,3 @@
+id,name,customer_id,amount,state
+201,Delta LLC,10,150,ACTIVE
+202,Echo Ltd,11,250,INACTIVE

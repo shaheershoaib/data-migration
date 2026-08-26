@@ -1,0 +1,5 @@
+legacy_id,status,amount
+1,REVERSED,100
+2,SETTLED,200
+3,REVERSED,300
+4,REVERSED,400

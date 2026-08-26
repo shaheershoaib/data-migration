@@ -1,0 +1,5 @@
+id,name,is_paid,status,contact_email,customer_id,amount,code
+101,Acme Ltd,1,FAILED,a@acme.test,1,100,AA
+102,Acme Ltd,1,PAID,b@acme.test,1,200,AA
+103,Borax Inc,1,REVERSED,c@borax.test,2,300,BB
+104,Cirrus Co,0,PAID,d@cirrus.test,3,not-a-number,CC
