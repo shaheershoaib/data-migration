@@ -75,14 +75,25 @@ inconsistencies becomes a silent defect downstream. Before writing any mapping, 
 
 - **Key uniqueness.** For every key you intend to join on: `GROUP BY key HAVING COUNT(*) > 1`.
   A natural key that maps N:1 resolves to whichever row it hits first. If it is not unique,
-  join on the surrogate id.
+  do NOT fall back to the surrogate id: across two systems the ids are unrelated
+  (step 3). Record the collision count and the values causing it; step 3 decides what
+  happens to them.
 - **NULL conventions.** Which columns are nullable, and what does NULL MEAN? A common
   convention is "this FK is NULL, so the identity lives in these other columns" - a
   transform that copies only the FK drops those rows' identity entirely.
 - **Value domains.** For each column that will land in a constrained destination field:
   the DISTINCT set actually present. Legacy free-text columns routinely contain values
   outside the enum you are mapping to, plus casing and whitespace variants.
-- **Orphans and dangling references.** Rows whose parent no longer exists.
+- **Orphans and dangling references.** Rows whose parent no longer exists - and DECIDE their
+  disposition here, not at load time. Under an enforced FK they abort the batch; under an
+  unenforced one they land dangling and the application renders a blank where a parent belongs.
+- **Soft deletes.** Find every "not really here" marker the source uses - `deleted_at`,
+  `is_deleted`, a status code, an archive table, a row the legacy UI filters out - and state
+  per table whether it migrates. Both defaults are wrong on their own: migrating them
+  resurrects records the business deleted, and dropping them orphans the live rows that still
+  reference them. The usual answer is to migrate the row, carry the marker, and confirm the
+  destination's own filters honour it - which starts with checking the destination HAS that
+  column at all.
 - **Type reality.** A column typed `varchar` that holds numbers will parse - until the one
   row that does not. Money and dates are where this bites.
 - **Encoding reality.** Mojibake and double-encoded UTF-8 (`Ã©` where `é` belongs) survive
@@ -98,6 +109,18 @@ is what makes a later "we did not know" false.
 Read the destination schema and write the contract it actually requires: types, enum
 membership, ranges, required-ness, referential integrity, precision (money in minor units,
 timezone handling for dates).
+
+**Pin the timezone of every datetime column on both sides, and write it down.** Legacy stores
+are routinely naive local time with no offset recorded. A destination column typed with a
+zone, or an application assuming UTC, then REINTERPRETS those values instead of converting
+them, and every timestamp moves by the offset - uniformly, which reconciles as a formatting
+class and is a real shift. DST makes it worse than a constant: the offset depends on each
+row's own date, so one correction factor is wrong for half the year. And a date-only value
+that crosses midnight changes the BUSINESS date - a check date, an invoice date, a period
+boundary - silently moving the row into a different reporting period. State the source zone
+and whether it observes DST, state the destination's storage convention, convert per row with
+a zone-aware library rather than an offset constant, and reconcile by value on a row from each
+side of a DST boundary and a row at 23:00 and 00:30 local.
 
 **Then enumerate what the destination actually ENFORCES.** This is the step everyone skips.
 Enums stored as free text, foreign keys declared without constraints, permissive numeric or
@@ -159,8 +182,27 @@ So:
 An id present in both systems is not evidence it means the same thing. Ids get
 re-sequenced at migration, reused, or scoped per-tenant.
 
+**A tenant-scoped key is not a key.** Where the source scopes ids or numbers per tenant, per
+company or per branch, the join key is the PAIR (tenant, key) and nothing else. Joining on the
+bare key attaches one tenant's rows to another's at full row count with no error, and unlike
+everything else in this file that one is a disclosure incident rather than a wrong number. It
+also poisons the census: `GROUP BY key HAVING COUNT(*) > 1` flags a sound per-tenant key as
+ambiguous and sends clean rows into the deferred pile. Group by the pair, and carry the tenant
+predicate into every join, every reconciliation query and every delete in the load.
+
 Validate each key against an **independent human-readable attribute** - a name, a document
-number, a natural key - and state the match rate. A wrong key does not fail loudly: it
+number, a natural key - and state the match rate.
+
+**Normalize both sides yourself, and report the match rate BOTH ways.** The two systems do not
+share a comparison rule: a case- and accent-insensitive collation matches "ABC Corp", "abc
+corp" and "ABC Corp " where the same comparison in your transform language does not, and
+trailing spaces are significant in some engines and ignored in others. Compare raw, then
+compare case-folded and trimmed, and report both numbers. The GAP between them counts the rows
+whose match depends on a rule the two systems do not agree on - each one either a false miss
+you are about to defer or a false merge attaching two real entities to one row, and which it is
+gets decided by looking at them, not by picking a collation.
+
+A wrong key does not fail loudly: it
 produces a complete-looking result in which every row is attached to the wrong entity, and
 that is indistinguishable from success without this check.
 
@@ -213,7 +255,16 @@ NULL, or a default nobody chose.
 - **Count the affected rows before choosing.** A fallback applied to nine rows and one
   applied to nine thousand are different decisions, and the count is what tells you which
   one you are making.
-- **Prefer DERIVING the value from an authoritative related record over a constant.** A
+- **Prefer DERIVING the value from an authoritative related record over a constant** - but
+  only where the parent's value is the one that was true WHEN THE CHILD WAS WRITTEN. It is
+  wrong the moment the parent is mutable and the child is a point-in-time record: an invoice,
+  a ledger entry, a statement, anything a person will later read as a record of what was true
+  on its date. Inheriting the CURRENT address, rate or owner onto a 2019 document rewrites
+  history, and that is worse than a constant, because it looks authoritative and re-derives to
+  the same wrong answer every time anyone checks it. Ask first whether the parent's field has
+  a history - an audit table, an effective-dated row, a superseded record - and if it does,
+  join on the child's date. If it does not, the value is not recoverable: take a marked
+  fallback or a counted skip, and say which. A
   child row missing a dimensional value can often inherit it from its parent, which is
   both more likely correct and re-derivable later. A hardcoded default is unfalsifiable
   after the fact: nothing distinguishes a row that genuinely held that value from a row
@@ -260,6 +311,19 @@ Not a sample, and not row counts. Compare the destination's values against the s
 truth for every row and report the **count of mismatches**; require zero, or explain each
 class that remains.
 
+**Fix the comparison rule before you run the comparison, or the reconciliation reports its
+own artifacts.** Compare money as integers in minor units; never float equality, and never a
+DECIMAL against a DOUBLE. Normalize both sides identically (trim, case, NULL versus empty
+string) and state which normalizations you applied, because each one is a difference you have
+decided not to see. Report the summed signed difference as well as the row count: a
+one-cent-per-row truncation over two million rows is $20,000 that a mismatch count never shows.
+
+**A UNIFORM mismatch class is the dangerous one.** Differences sharing a sign, a magnitude, a
+factor or a constant offset are a systematic transform defect - truncation where the source
+rounds, minor units against major, a timezone shift - not noise. "Explain each class" means
+naming the line of the transform that produces it and why that behaviour is correct. A class
+you can only describe is a class you have not explained.
+
 This is also how a denormalized or summary field is caught drifting from the records it
 summarises: derive the value from the authoritative rows, compare against the stored one
 across the whole population, and emit a backfill for the difference.
@@ -288,7 +352,14 @@ sequence counters do not follow explicit inserts everywhere; the first applicati
 after cut-over collides with a migrated id. No check on the migrated data can see this
 defect - it lives in FUTURE rows - so it has to be a step, not a finding.
 
-Destructive operations get a restore path proven BEFORE they run, not discovered after.
+Destructive operations get a restore path proven BEFORE they run, not discovered after - and
+the restore has to be SCOPED the way the load was. A point-in-time restore of the whole
+database is the "all tables" mistake pointed backwards: it reverses every application write and
+every destination-owned row created since the timestamp, which on a live destination is real
+users' work, including the tables the top of this section told you to protect. Prove a restore
+of exactly the tables the transform owns - snapshot those before the load, restore those. If
+the destination is live and taking writes, roll-FORWARD is the only available direction: say so
+before the first batch, not after one fails.
 
 ## Step 6b - rehearse at PRODUCTION SCALE, and make the run resumable
 
@@ -315,8 +386,14 @@ bug:
 - **Across two systems, the progress record cannot live with the source.** That forks the
   problem. If the load can be made IDEMPOTENT on a key observable in the DESTINATION alone
   - does this row already exist, judged without consulting the source - then resume is
-  free: re-run it and the completed rows skip themselves, no checkpoint state at all, and
-  the cross-system case is genuinely easier than the single-system one. If it cannot -
+  cheap: re-run it and the completed rows skip themselves, with no checkpoint state at all.
+  Two conditions, and both must hold or the resume silently loses rows. The existence check
+  must be at the grain of the whole UNIT OF WORK, not of the first row written: a parent
+  inserted ahead of its children makes the parent's presence say "done" while the children are
+  gone, at a clean parent count. And each unit must be written in ONE transaction, so a killed
+  batch leaves it wholly present or wholly absent - existence cannot tell a complete row from
+  one a kill caught half-populated. Where the unit spans tables, key the check on the LAST
+  write and wrap the unit. If it cannot -
   an UPDATE, or an insert with no natural destination-side key - then it is materially
   harder, because you must persist which source rows were applied AS A TABLE IN THE
   DESTINATION. Decide which of those two you are in before the first batch runs.
@@ -324,6 +401,13 @@ bug:
   meeting a negative value, or a value exceeding a width, can fail the entire statement -
   clamp or validate before the write, and know which failures are per-row and which are
   fatal to the batch.
+- **Declare the CHARACTER SET at every hop, the way you declare the columns.** A census of
+  the source cannot detect damage the TRANSFER does: the source column's charset, the client
+  connection's charset, the file's encoding and the load statement's charset clause are four
+  separate settings, and any one left to a default turns an accented character into mojibake
+  or a `?` on the way through. Round-trip one known non-ASCII row end to end over the real
+  channel before the bulk run and compare it BYTE for byte - a terminal rendering both the
+  same is not evidence.
 - **Name the columns in every load statement.** A positional LOAD/COPY silently shears when
   the file and the table disagree on column order: every value lands, every count
   reconciles, and each field holds its neighbour's data. Explicit column lists are one
