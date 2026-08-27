@@ -141,13 +141,6 @@ validator: an assertion in the project's own test runner survives after the
 migration is over, and a one-off script does not. This tool is for the case where
 there is no such framework yet, or the migration is happening before one exists.
 
-## Related
-
-- [receipts](https://github.com/shaheershoaib/receipts), the verification standard
-  these rules are drawn from. Its `G18` is the canonical, enforceable form.
-- [fanout](https://github.com/shaheershoaib/fanout), for when a migration
-  decomposes into many independent transforms.
-
 ## License
 
 Apache License 2.0. Copyright 2026 Shaheer Shoaib. See `LICENSE` and `NOTICE`.

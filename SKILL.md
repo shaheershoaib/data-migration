@@ -11,7 +11,7 @@ with a completely wrong result. Every failure this skill exists to prevent looke
 success at the moment it happened.
 
 **Boundary:** this is the loop for the TRANSFORM only. It does not replace your normal
-review-and-ship process - the output still crosses review, CI and deploy like any other
+review-and-release process - the output still crosses review, CI and deploy like any other
 change. What lives here is the discipline that process cannot supply, because no test on
 the changed code can tell you the data it produced is wrong.
 
@@ -194,7 +194,7 @@ honest downgrade rather than calling it done.
 ## Running the mechanical checks
 
 Most of this loop is judgment. Seven of the checks are not - they are queries whose answer
-is a number, and they ship as `migration_check.py` beside this file:
+is a number, and they are executable. They live in `migration_check.py`, beside this file:
 
 ```bash
 python3 migration_check.py --spec spec.json
@@ -222,8 +222,8 @@ outlive the migration.
 
 ## Where this sits relative to existing tooling
 
-The published migration skills and most ORM tooling cover **schema mechanics** - DDL,
-expand/contract, zero-downtime cutover, rollback, version ordering - and assume the data
+Published migration tooling, and most ORM tooling, covers **schema mechanics** - DDL,
+expand/contract, zero-downtime cutover, rollback, version ordering - and assumes the data
 itself is clean. That is a different problem from this one, and they compose: use them for
 HOW the schema changes, use this for WHETHER the data that landed is right.
 
@@ -232,14 +232,3 @@ Expectations, Soda, data-diff) express exactly these destination-side constraint
 EMITTING the contract, uniqueness and reconciliation checks into whichever of those a
 project already runs, rather than writing a bespoke validator: an assertion in the project's
 own test runner survives after the migration is over, and a one-off script does not.
-
-## Related
-
-This skill stands alone and has no dependencies. Two optional companions:
-
-- [receipts](https://github.com/shaheershoaib/receipts) - the verification standard these
-  rules are drawn from. Its `G18` is the canonical, enforceable form of this file, alongside
-  the gates for expand/contract ordering, fixing every existing instance of a defect, and
-  what makes a green run trustworthy.
-- [fanout](https://github.com/shaheershoaib/fanout) - when a migration decomposes into many
-  independent transforms, for deciding which can run in parallel and in what order.
