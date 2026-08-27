@@ -395,6 +395,18 @@ construction - and an entry missing a date, or carrying a non-ISO one, fails rat
 silently passing). A declared input with ZERO rows is a block too, unless `allow_empty`
 says it is deliberate - an empty extract is the wrong-WHERE clause wearing a clean run.
 
+**It tells you what it did NOT check.** Every section is optional, so a spec declaring
+almost nothing prints an unbroken column of `ok` and looks identical to a thorough run. Each
+undeclared section is therefore printed as `NOT RUN` with the cost of its absence, and the
+summary carries the count. Declining a check is legitimate - many sections do not apply to a
+given migration - but that has to be a visible decision rather than one inferred from silence.
+
+That is also the boundary of what any tool can enforce here. It cannot know whether your
+precedence rule is right, whether the census was thorough, or whether the fallback you chose
+is sane. It can only know whether you declared one. **Presence of a decision is enforceable;
+its correctness is not** - and pretending otherwise would be the same green-on-wrong trap the
+rest of this file exists to prevent.
+
 Exit codes: **0** = every declared check passed; **1** = a check FAILED - a block, because
 the transform is not proven; **2** = the spec itself is invalid. CSV in, so it runs against
 an extract, in CI, or against a fixture with no database driver.
