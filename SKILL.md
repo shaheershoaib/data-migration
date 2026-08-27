@@ -136,6 +136,15 @@ number, a natural key - and state the match rate. A wrong key does not fail loud
 produces a complete-looking result in which every row is attached to the wrong entity, and
 that is indistinguishable from success without this check.
 
+**A sentinel in the KEY column force-maps everything to one value.** The worst bad join is
+not a missing key, it is a placeholder that LOOKS like one. An extract that renders NULLs as
+the literal text `"NULL"`, or a legacy default of `"0"` / `"000"`, becomes a real map key:
+every record with no true key collides on it and is force-mapped to one arbitrary value, at
+full row count, with no error anywhere. Filter the extract at the SOURCE
+(`WHERE key IS NOT NULL AND key NOT IN (<junk set>)`) rather than downstream, and when you
+build a key-to-value map, dedup to the single REAL value - otherwise last-seen-wins quietly
+decides, and a placeholder shadows the real one.
+
 **Across two systems there is often no shared surrogate at all.** "If the natural key is
 not unique, join on the surrogate id" is within-database advice: ids get re-sequenced at
 migration, so the destination's id and the source's id are unrelated even where both
@@ -168,6 +177,11 @@ or absent. Finding them is not the decision. What happens to those rows is, and 
 unstated it gets made row-by-row by whatever the code does when a lookup misses - usually
 NULL, or a default nobody chose.
 
+- **Treat SENTINELS as missing, not as data.** A placeholder where a name belongs, a
+  synthesized address, a zero that means "not calculated yet" rather than zero: each migrates
+  cleanly and is wrong, because nothing downstream can tell it from a real value. Enumerate
+  the sentinels the source actually uses during the census, and decide per column whether each
+  becomes NULL, a fallback, or a counted skip.
 - **Count the affected rows before choosing.** A fallback applied to nine rows and one
   applied to nine thousand are different decisions, and the count is what tells you which
   one you are making.
@@ -228,6 +242,13 @@ A destination accumulates rows the source never had: users, roles, permissions, 
 anything created after cut-over. **A reload scoped to "all tables" destroys them.** Scope
 every load to the tables the transform owns, and name the excluded tables explicitly.
 
+**Check what is IN-FLIGHT before a bulk mutation on a shared path.** A record another
+process depends on in its CURRENT state - a batch awaiting a response, a job mid-retry,
+anything a downstream system has already been told about - must not be advanced underneath
+it. The transform is correct in isolation and still breaks the system, which is exactly why
+a row-level review never catches it. Identify the in-flight states before the write and
+exclude them.
+
 Destructive operations get a restore path proven BEFORE they run, not discovered after.
 
 ## Step 6b - rehearse at PRODUCTION SCALE, and make the run resumable
@@ -269,6 +290,17 @@ bug:
 different rollback, and different rehearsal needs; bundling them means a data defect forces
 a schema rollback. And once a migration has been APPLIED anywhere, treat it as immutable -
 correct it with a new one rather than editing history that other environments already ran.
+
+## Step 6c - a defect found in one row is a CLASS
+
+A migrated row reported wrong is a SIGNATURE, not a scope. Write the predicate that selects
+it - the condition that makes that row wrong - run it over the whole table, and fix every
+match. Closing on the reported row leaves the rest of its class live, and the next report is
+drawn from exactly the population you left behind.
+
+The evidence is that the class is EMPTY: the count of still-matching rows is zero. Not that
+the reported row is now right. If you deliberately fix a subset, that needs sign-off naming
+what is excluded and why, agreed before you close rather than after.
 
 ## Step 7 - close out
 
