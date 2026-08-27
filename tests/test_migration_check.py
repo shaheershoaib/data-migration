@@ -470,5 +470,41 @@ class MutuallyExclusiveFlags(unittest.TestCase):
         self.assertEqual(by_name(res, "exclusivity-precedence")["cases"][0]["rows_checked"], 4)
 
 
+class SilenceIsNotAPass(unittest.TestCase):
+    """The strongest check is opt-in, so its ABSENCE has to be visible.
+
+    Without this, a spec that omits `reconcile` prints an unbroken column of `ok` while every
+    landed value goes uncompared - the tool's own "zero rows compared is not a pass" rule,
+    applied one level up.
+    """
+
+    def _spec_without(self, section, destination):
+        spec = json.loads(open(F("spec_ok.json"), encoding="utf-8").read())
+        spec["destination"] = destination
+        spec.pop(section, None)
+        path = F("_notrun_%d.json" % next(_seq))
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(spec, fh)
+        self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
+        return path
+
+    def test_undeclared_reconcile_is_announced_not_silent(self):
+        path = self._spec_without("reconcile", "new_value_bad.csv")
+        _, r = run_path(path, json_out=False)
+        self.assertIn("NOT RUN", r.stdout)
+        self.assertIn("value-reconciliation", r.stdout)
+        # reported, never fatal: not declaring a check is a choice, just a visible one
+        self.assertEqual(r.returncode, 0)
+
+    def test_declared_reconcile_produces_no_not_run_line(self):
+        _, r = run_path(F("spec_ok.json"), json_out=False)
+        self.assertNotIn("NOT RUN", r.stdout)
+
+    def test_json_output_carries_not_run(self):
+        path = self._spec_without("reconcile", "new_ok.csv")
+        out, _ = run_path(path)
+        self.assertEqual([n["check"] for n in out["not_run"]], ["value-reconciliation"])
+
+
 if __name__ == "__main__":
     unittest.main()

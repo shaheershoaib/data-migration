@@ -495,6 +495,28 @@ def run(spec, base="."):
     return results
 
 
+def not_run(spec):
+    """Declared-optional checks that did not run, so their silence cannot read as a pass.
+
+    The whole premise here is that a clean result proves nothing unless you know what was
+    actually compared. `reconcile` is the strongest check in the file and it is opt-in, so
+    a spec that omits it prints an unbroken column of `ok` while every landed value goes
+    uncompared. That is the tool's own "zero rows compared is not a pass" rule applied one
+    level up: zero COLUMNS reconciled is not a pass either. Reported, never fatal - not
+    declaring a check is a choice, but it should be a visible one.
+    """
+    # PRESENCE, not truthiness: an empty `reconcile: {}` is a real declaration meaning
+    # "every mapped column", and reading it as absent would announce a check that ran.
+    out = []
+    if "reconcile" not in spec:
+        out.append(("value-reconciliation",
+                    "no `reconcile` declared - landed values were never compared to the source"))
+    if "key" not in spec:
+        out.append(("key-identity",
+                    "no `key` declared - nothing verified rows attached to the right entity"))
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser(description="mechanical migration checks")
     ap.add_argument("--spec", required=True)
@@ -511,8 +533,11 @@ def main():
     results = run(spec, os.path.dirname(os.path.abspath(a.spec)))
     failed = [r for r in results if not r.get("ok", True)]
     if a.json:
-        print(json.dumps({"results": results, "failed": len(failed)}, indent=2))
+        print(json.dumps({"results": results, "failed": len(failed),
+                          "not_run": [{"check": n, "why": w} for n, w in not_run(spec)]}, indent=2))
     else:
+        for name, why in not_run(spec):
+            print("--    %s (NOT RUN: %s)" % (name, why))
         for r in results:
             print(("FAIL  " if not r.get("ok", True) else "ok    ") + r["check"])
             if not r.get("ok", True):
