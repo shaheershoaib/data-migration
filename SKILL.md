@@ -31,6 +31,10 @@ Establish the path FIRST, and time it:
   use. A path that works for a SELECT can fail for a write: execution channels vary in
   whether they allocate a terminal, how large a payload they accept, and how long they
   stay open.
+- **Expect the "channel" to be several channels.** Reading the source, moving the data,
+  and writing the destination are routinely three different mechanisms with three different
+  limits, and proving one says nothing about the others. Prove each end to end. The write
+  path is the one that surprises people, because it is the one exercised last.
 - **Let the channel constrain the design, not the other way round.** Payload caps and
   time limits decide batch size and whether the transform runs where the data is or where
   you are. Discovering the cap mid-load turns a transform into an outage.
@@ -145,10 +149,14 @@ Do not resolve it by picking a match. Instead:
    empty-equivalents, a default the legacy UI wrote when the field was skipped) generate
    most of the collisions, and they are recognisable.
 2. **Land the unambiguous rows now.** They are the majority and they are provable.
-3. **Re-key the ambiguous ones through a higher-grain parent** that IS unambiguous - the
-   owning entity one level up - and treat them as a separate phase with its own evidence.
-   A parent-scoped match is a weaker claim than a direct key match, so it earns its own
-   verification rather than riding along with the clean rows.
+3. **Find the ambiguous rows a DIFFERENT key path** - usually not a coarser grain of the
+   key that just failed. When the ambiguity comes from placeholders, those rows have no
+   usable key at all, so there is nothing to re-join more loosely; what they need is
+   another route from source to destination entirely, typically through an owning entity
+   that both systems identify unambiguously. That is a new source-to-destination key
+   chain, and it earns its OWN pass through this step - its own uniqueness check and its
+   own match rate against an independent attribute. Inheriting confidence from the first
+   key path is exactly the mistake this step exists to prevent.
 4. **Report the deferred count as part of coverage.** A phase you named is a decision; a
    phase you silently dropped is the "it ran clean over a subset" failure wearing a
    different hat.
@@ -173,6 +181,13 @@ NULL, or a default nobody chose.
   were guessed.
 - **Never let unmappable mean silently skipped.** Every row is transformed, deliberately
   fallen back, or skipped with a counted reason. Those three must sum to the input.
+
+This step is cheap at design time and awkward to retrofit: marking and counting fallbacks
+is a line of code before the transform is written and a re-review afterwards. If you reach
+it late, the count is what lets you choose honestly - a small, non-money-bearing fallback
+set can be an ACCEPTED untraceability, recorded as such with its number, while a large or
+money-bearing one is worth the retrofit. Deciding that is legitimate; leaving it unstated
+is not.
 
 ## Step 4 - transform, and state COVERAGE
 
@@ -237,6 +252,14 @@ bug:
 - **Checkpoint, so a killed run resumes instead of restarting.** Record what has been
   processed; a transform that must start over from zero after a failure will be run under
   pressure, and that is when it gets run wrong.
+- **Across two systems, the progress record cannot live with the source.** That forks the
+  problem. If the load can be made IDEMPOTENT on a key observable in the DESTINATION alone
+  - does this row already exist, judged without consulting the source - then resume is
+  free: re-run it and the completed rows skip themselves, no checkpoint state at all, and
+  the cross-system case is genuinely easier than the single-system one. If it cannot -
+  an UPDATE, or an insert with no natural destination-side key - then it is materially
+  harder, because you must persist which source rows were applied AS A TABLE IN THE
+  DESTINATION. Decide which of those two you are in before the first batch runs.
 - **Watch for column constraints that abort the BATCH, not the row.** An unsigned column
   meeting a negative value, or a value exceeding a width, can fail the entire statement -
   clamp or validate before the write, and know which failures are per-row and which are
@@ -280,6 +303,17 @@ artifact older than the data it maps is stale by construction).
 It exits **non-zero on any failure** - a failing check is a block, because the transform is
 not proven. CSV in, so it runs against an extract, in CI, or against a fixture with no
 database driver.
+
+**Run the CHECKS before the extract; the script is a backstop, not the first line.** These
+are a discipline first and a script second, and the moment they pay is BEFORE you trust an
+extract - run them on the source however you can query it, in its own dialect, on whatever
+channel reaches it. Waiting for a CSV inverts the order: by the time you have one you have
+already decided which rows and columns to pull, which is exactly what uniqueness, identity
+and coverage were supposed to inform. That ordering matters most in the case the script
+cannot serve at all - two systems behind different drivers and different channels, where no
+single connection spans both. The script stays deliberately CSV-only for that reason: a
+live-connection mode would need a driver per system, would still not span them, and would
+cost the property that lets this run anywhere with nothing installed.
 
 `tests/` seeds a fixture with one instance of every defect class above and asserts each is
 caught - plus a CLEAN fixture that must produce ZERO findings. That second half matters as
