@@ -496,14 +496,32 @@ class SilenceIsNotAPass(unittest.TestCase):
         # reported, never fatal: not declaring a check is a choice, just a visible one
         self.assertEqual(r.returncode, 0)
 
-    def test_declared_reconcile_produces_no_not_run_line(self):
+    def test_a_declared_section_is_not_announced_as_missing(self):
+        # spec_ok declares reconcile, so reconcile must NOT appear; it omits exclusivity,
+        # so that one must. Asserting "no NOT RUN anywhere" would be wrong: a spec that
+        # legitimately skips a section should still say so.
         _, r = run_path(F("spec_ok.json"), json_out=False)
-        self.assertNotIn("NOT RUN", r.stdout)
+        self.assertNotIn("value-reconciliation (NOT RUN", r.stdout)
+        self.assertIn("exclusivity-precedence (NOT RUN", r.stdout)
+
+    def test_the_summary_admits_how_much_went_unchecked(self):
+        # "0/1 checks failed" on a near-empty spec reads as success. The count of what did
+        # not run is the part that stops it reading that way.
+        spec = {"source": "legacy_ok.csv", "destination": "new_ok.csv"}
+        path = F("_bare_%d.json" % next(_seq))
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(spec, fh)
+        self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
+        _, r = run_path(path, json_out=False)
+        self.assertIn("NOT RUN", r.stdout)
+        self.assertIn("proves less than it looks like", r.stdout)
 
     def test_json_output_carries_not_run(self):
         path = self._spec_without("reconcile", "new_ok.csv")
         out, _ = run_path(path)
-        self.assertEqual([n["check"] for n in out["not_run"]], ["value-reconciliation"])
+        names = [n["check"] for n in out["not_run"]]
+        self.assertIn("value-reconciliation", names)
+        self.assertTrue(all(n["why"] for n in out["not_run"]), "each absence states its cost")
 
 
 if __name__ == "__main__":

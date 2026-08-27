@@ -495,26 +495,50 @@ def run(spec, base="."):
     return results
 
 
-def not_run(spec):
-    """Declared-optional checks that did not run, so their silence cannot read as a pass.
+# What each optional section buys you, and therefore what its ABSENCE costs. The wording is
+# the cost, not the feature: a reader scanning output needs to see what went unverified, not
+# what they could have configured.
+OPTIONAL_CHECKS = [
+    ("reconcile",       "value-reconciliation",
+     "landed values were never compared to the source"),
+    ("key",             "key-identity",
+     "nothing verified that rows attached to the right entity"),
+    ("exclusivity",     "exclusivity-precedence",
+     "no precedence declared - a row asserting two contradictory states resolves however the "
+     "transform happened to write it"),
+    ("counterexamples", "counterexamples",
+     "no inferred field meaning was ever tested against the authoritative column"),
+    ("contract",        "destination-contract",
+     "types, enums, ranges and required-ness were never asserted on the destination"),
+    ("grain",           "grain",
+     "a one-to-many flattened to one-to-one would not have been noticed"),
+    ("columns",         "column-coverage",
+     "a source column that was never carried would leave every row count perfect"),
+    ("provenance",      "provenance",
+     "a hand-supplied mapping older than the data it maps was never checked for staleness"),
+]
 
-    The whole premise here is that a clean result proves nothing unless you know what was
-    actually compared. `reconcile` is the strongest check in the file and it is opt-in, so
-    a spec that omits it prints an unbroken column of `ok` while every landed value goes
-    uncompared. That is the tool's own "zero rows compared is not a pass" rule applied one
-    level up: zero COLUMNS reconciled is not a pass either. Reported, never fatal - not
-    declaring a check is a choice, but it should be a visible one.
+
+def not_run(spec):
+    """Every discipline step this run did NOT perform, so silence cannot read as a pass.
+
+    The tool's own rule is that zero rows compared is not a pass. This applies it one level
+    up: a spec that omits a section prints an unbroken column of `ok` while that entire class
+    of defect goes unexamined, and the output looks identical to a run that checked
+    everything. Naming the absences turns "nobody thought about it" into a line you can read.
+
+    Reported, NEVER fatal. Declining a check is a legitimate decision - many sections do not
+    apply to a given migration. What is not legitimate is that decision being invisible.
+
+    Judgment is the boundary here. The tool cannot know whether your precedence rule is
+    right, whether the census was thorough, or whether the fallback you chose is sane. It can
+    only know whether you declared one. That is the whole enforceable slice: presence of a
+    decision, never its correctness.
+
+    PRESENCE, not truthiness - an empty `reconcile: {}` is a real declaration meaning "every
+    mapped column", and reading it as absent would announce a check that actually ran.
     """
-    # PRESENCE, not truthiness: an empty `reconcile: {}` is a real declaration meaning
-    # "every mapped column", and reading it as absent would announce a check that ran.
-    out = []
-    if "reconcile" not in spec:
-        out.append(("value-reconciliation",
-                    "no `reconcile` declared - landed values were never compared to the source"))
-    if "key" not in spec:
-        out.append(("key-identity",
-                    "no `key` declared - nothing verified rows attached to the right entity"))
-    return out
+    return [(check, why) for section, check, why in OPTIONAL_CHECKS if section not in spec]
 
 
 def main():
@@ -555,7 +579,13 @@ def main():
                                 or v == [] or v == {}:
                             continue
                         print("        %s: %s" % (k, json.dumps(v)[:160]))
-        print("\n%d/%d checks failed" % (len(failed), len(results)))
+        # The count of failures is not the whole verdict: "0/1 checks failed" reads as
+        # success on a spec that declared almost nothing. Coverage belongs in the summary.
+        skipped = not_run(spec)
+        summary = "\n%d/%d checks failed" % (len(failed), len(results))
+        if skipped:
+            summary += "  |  %d NOT RUN - this proves less than it looks like" % len(skipped)
+        print(summary)
     # a failing check is a BLOCK: the transform is not proven
     sys.exit(1 if failed else 0)
 
