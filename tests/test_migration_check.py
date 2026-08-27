@@ -421,7 +421,8 @@ class CleanMigrationIsNotBlocked(unittest.TestCase):
         res, _ = run("spec_ok.json")
         ran = {r["check"] for r in res["results"]}
         self.assertEqual(ran, {"row-census", "key-uniqueness", "key-uniqueness-destination",
-                               "key-identity", "value-reconciliation", "column-coverage",
+                               "spec-references", "key-identity", "destination-provenance",
+                             "value-reconciliation", "column-coverage",
                                "coverage-summation", "grain", "destination-contract",
                                "counterexamples", "provenance"})
 

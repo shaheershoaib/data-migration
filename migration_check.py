@@ -50,6 +50,19 @@ def read(path):
         return list(csv.DictReader(f))
 
 
+SENTINEL_STRINGS = {"nan", "null", "none", "nil", "n/a", "na", "undefined", "-"}
+
+
+def _is_sentinel(v):
+    """A value that is present as text and absent in meaning.
+
+    `required` counted anything non-empty, so the literal strings "None" and "NULL" - what a
+    naive export writes for a null - satisfied it. And float("nan") is numeric while
+    nan < min and nan > max are BOTH false, so a NaN cleared type, min and max simultaneously.
+    """
+    return str(v).strip().lower() in SENTINEL_STRINGS
+
+
 def _num(v):
     try:
         float(v); return True
@@ -105,9 +118,16 @@ def validate_spec(spec):
     if unknown:
         errors.append("unknown spec section(s): %s (known: %s)"
                       % (", ".join(unknown), ", ".join(sorted(KNOWN_SECTIONS))))
+    cov = spec.get("coverage")
+    if isinstance(cov, dict):
+        for k in ("skipped", "deferred"):
+            v = cov.get(k)
+            if v is not None and (not isinstance(v, int) or isinstance(v, bool) or v < 0):
+                # a negative allowance makes the summation endorse a fan-out
+                errors.append("coverage.%s must be a non-negative integer, got %r" % (k, v))
     key = spec.get("key")
     if key is not None:
-        _unknown_keys(errors, "key", key, {"source", "destination", "identity"})
+        _unknown_keys(errors, "key", key, {"source", "destination", "identity", "allow_unmatched"})
         for req in ("source", "destination"):
             if req not in key:
                 errors.append("key: missing %r" % req)
@@ -141,6 +161,30 @@ def validate_spec(spec):
             if req not in c:
                 errors.append("exclusivity[%d]: missing %r" % (i, req))
     return errors
+
+
+def check_destination_provenance(src, dst, key_spec):
+    """Every destination row must trace back to a source row.
+
+    Every other check in this file walks the SOURCE and asks whether it arrived. None of
+    them ever walks the destination, so the destination's population is unbounded: a row
+    that exists in no source is invisible to all of them. That is what lets a deletion and
+    an invention cancel out - drop one real row, gain one phantom, and the row counts
+    reconcile, the per-parent histogram reconciles, and every value that IS compared
+    matches, because the missing row is simply never compared.
+
+    Rows legitimately created by the destination (defaults, generated parents) are declared
+    via `allow_unmatched`; the point is that they be named, not that they be forbidden.
+    """
+    sk, dk = key_spec["source"], key_spec["destination"]
+    allow = int(key_spec.get("allow_unmatched", 0) or 0)
+    source_keys = {(r.get(sk) or "").strip() for r in src}
+    orphans = [(r.get(dk) or "").strip() for r in dst
+               if (r.get(dk) or "").strip() and (r.get(dk) or "").strip() not in source_keys]
+    return {"check": "destination-provenance", "destination_rows": len(dst),
+            "unmatched_in_source": len(orphans), "allow_unmatched": allow,
+            "examples": sorted(orphans)[:5],
+            "ok": len(orphans) <= allow}
 
 
 def check_key_uniqueness(rows, col, check_name="key-uniqueness"):
@@ -206,7 +250,10 @@ def check_key_identity(src, dst, key_spec):
             "min_match_rate": threshold, "missing_in_destination": missing,
             "ambiguous_destination_keys": len(ambiguous), "excluded_ambiguous": excluded,
             "blank_source_keys": blank_src, "mismatch_examples": mismatches,
-            "ok": compared > 0 and rate >= threshold}
+            # A source row the destination never received cannot have "matched". This
+            # number was already computed and discarded, so 999 of 1000 rows missing
+            # reported ok on a 100% match rate over the 1 that landed.
+            "ok": compared > 0 and rate >= threshold and missing == 0}
 
 
 def check_reconciliation(src, dst, rec, key_spec, mapped):
@@ -260,7 +307,10 @@ def check_reconciliation(src, dst, rec, key_spec, mapped):
             "columns_compared": sorted(pairs), "mismatched_values": total,
             "mismatches_by_column": dict(by_column), "missing_in_destination": missing,
             "ambiguous_destination_keys": len(ambiguous), "examples": examples,
-            "ok": rows_compared > 0 and total == 0}
+            # Three ways to compare nothing and call it success: no rows, no columns
+            # (a typo in reconcile.columns silently empties the pair list), and rows
+            # the destination never received.
+            "ok": rows_compared > 0 and bool(pairs) and total == 0 and missing == 0}
 
 
 def check_column_coverage(src, dst, spec):
@@ -314,8 +364,14 @@ def check_contract(dst, contract):
     out = []
     for col, rule in contract.items():
         vals = [r.get(col, "") for r in dst]
-        present = [v for v in vals if v not in (None, "")]
+        # A sentinel string is present as text and absent in meaning: "None", "NULL", "nan".
+        # Counting it as present let every required column pass while holding no value.
+        present = [v for v in vals if v not in (None, "") and not _is_sentinel(v)]
+        sentinels = [v for v in vals if v not in (None, "") and _is_sentinel(v)]
         viol = []
+        if sentinels:
+            viol.append({"rule": "sentinel", "rows": len(sentinels),
+                         "examples": sorted(set(map(str, sentinels)))[:5]})
         if rule.get("required") and len(present) != len(vals):
             viol.append({"rule": "required", "empty_rows": len(vals) - len(present)})
         if len(vals) and not present:
@@ -359,11 +415,17 @@ def check_counterexamples(src, cases):
     out = []
     for c in cases:
         when, contra = c.get("source_when", {}), c.get("contradicted_by", {})
-        hits = 0
+        hits = selected = 0
         for r in src:
-            if _when_match(r, when) and any((r.get(k, "") in vs) for k, vs in contra.items()):
+            if not _when_match(r, when):
+                continue
+            selected += 1
+            if any((r.get(k, "") in vs) for k, vs in contra.items()):
                 hits += 1
-        out.append({"name": c.get("name", "?"), "contradicting_rows": hits, "ok": hits == 0})
+        # selected == 0 means source_when matched no rows: the hypothesis was never
+        # actually tested, which is not the same as surviving the test
+        out.append({"name": c.get("name", "?"), "source_rows_selected": selected,
+                    "contradicting_rows": hits, "ok": hits == 0 and selected > 0})
     return {"check": "counterexamples", "cases": out, "ok": all(c["ok"] for c in out)}
 
 
@@ -423,7 +485,10 @@ def check_exclusivity(src, dst, cases):
                     "precedence_violations": violations,
                     "missing_in_destination": missing, "allow_missing": allow_missing,
                     "ambiguous_destination_keys": len(ambiguous), "examples": examples,
-                    "ok": violations == 0 and missing <= allow_missing and not ambiguous})
+                    # checked == 0 means the when-clauses matched nothing - usually a
+                    # misspelled column, never evidence of correctness
+                    "ok": checked > 0 and violations == 0
+                          and missing <= allow_missing and not ambiguous})
     return {"check": "exclusivity-precedence", "cases": out,
             "ok": all(c["ok"] for c in out)}
 
@@ -452,6 +517,53 @@ def check_provenance(entries):
             "invalid": invalid, "ok": not stale and not invalid}
 
 
+def check_spec_references(spec, src, dst):
+    """Every column a spec NAMES must exist in the file it names it against.
+
+    Spec VALUES were already strict - an unknown section or rule key exits 2. Spec
+    REFERENCES were not: a column name inside reconcile.columns, grain.*_parent, a contract
+    key, or a `when` predicate was compared against headers that need not contain it, and a
+    miss simply selected nothing. That inverts the tool's purpose, because the check still
+    prints `ok`: a typo does not weaken verification, it silently removes it while leaving
+    the reassuring line in place. `state` for `status` is the whole exploit.
+    """
+    sh = set(src[0].keys()) if src else set()
+    dh = set(dst[0].keys()) if dst else set()
+    bad = []
+
+    def want(col, headers, side, where):
+        if col and headers and col not in headers:
+            bad.append("%s: '%s' is not a column in the %s" % (where, col, side))
+
+    rec = spec.get("reconcile")
+    if isinstance(rec, dict):
+        mapped = (spec.get("columns") or {}).get("mapped") or {}
+        for c in (rec.get("columns") or []):
+            if c not in mapped:
+                bad.append("reconcile.columns: '%s' is not in columns.mapped" % c)
+        for c in (rec.get("exclude") or []):
+            if c not in mapped:
+                bad.append("reconcile.exclude: '%s' is not in columns.mapped" % c)
+    g = spec.get("grain")
+    if isinstance(g, dict) and g:
+        want(g.get("source_parent"), sh, "source", "grain.source_parent")
+        want(g.get("destination_parent"), dh, "destination", "grain.destination_parent")
+    for col in (spec.get("contract") or {}):
+        want(col, dh, "destination", "contract")
+    for c in (spec.get("counterexamples") or []):
+        for col in (c.get("source_when") or {}):
+            want(col, sh, "source", "counterexamples.source_when")
+        for col in (c.get("contradicted_by") or {}):
+            want(col, sh, "source", "counterexamples.contradicted_by")
+    for c in (spec.get("exclusivity") or []):
+        want(c.get("destination_column"), dh, "destination", "exclusivity.destination_column")
+        for st in (c.get("states") or []):
+            for col in (st.get("when") or {}):
+                want(col, sh, "source", "exclusivity.states.when")
+    return {"check": "spec-references", "checked_names": True,
+            "unknown": sorted(bad), "ok": not bad}
+
+
 def run(spec, base="."):
     def path(p):
         return p if os.path.isabs(p) else os.path.join(base, p)
@@ -462,35 +574,37 @@ def run(spec, base="."):
     empty = [side for side, rows, declared in (("source", src, spec.get("source")),
                                                ("destination", dst, spec.get("destination")))
              if declared and not rows]
+    results_pre = [check_spec_references(spec, src, dst)]
     census = {"check": "row-census", "source_rows": len(src), "destination_rows": len(dst),
               "ok": not empty or bool(spec.get("allow_empty"))}
     if empty:
         census["empty_inputs"] = empty
-    results = [census]
+    results = results_pre + [census]
     if spec.get("key"):
         results.append(check_key_uniqueness(src, spec["key"]["source"]))
         if spec.get("destination"):
             results.append(check_key_uniqueness(dst, spec["key"]["destination"],
                                                 "key-uniqueness-destination"))
+            results.append(check_destination_provenance(src, dst, spec["key"]))
         ident = check_key_identity(src, dst, spec["key"])
         if ident:
             results.append(ident)
     if spec.get("reconcile") is not None:
         results.append(check_reconciliation(src, dst, spec["reconcile"], spec["key"],
                                             spec["columns"]["mapped"]))
-    if spec.get("columns"):
+    if spec.get("columns") is not None:
         results.append(check_column_coverage(src, dst, spec["columns"]))
     if spec.get("coverage") is not None:
         results.append(check_coverage(src, dst, spec["coverage"]))
-    if spec.get("grain"):
+    if spec.get("grain") is not None:
         results.append(check_grain(src, dst, spec["grain"]))
-    if spec.get("contract"):
+    if spec.get("contract") is not None:
         results.append(check_contract(dst, spec["contract"]))
-    if spec.get("counterexamples"):
+    if spec.get("counterexamples") is not None:
         results.append(check_counterexamples(src, spec["counterexamples"]))
-    if spec.get("exclusivity"):
+    if spec.get("exclusivity") is not None:
         results.append(check_exclusivity(src, dst, spec["exclusivity"]))
-    if spec.get("provenance"):
+    if spec.get("provenance") is not None:
         results.append(check_provenance(spec["provenance"]))
     return results
 
@@ -514,6 +628,8 @@ OPTIONAL_CHECKS = [
      "a one-to-many flattened to one-to-one would not have been noticed"),
     ("columns",         "column-coverage",
      "a source column that was never carried would leave every row count perfect"),
+    ("coverage",        "coverage-summation",
+     "row totals were never summed - a partially applied load would not have been noticed"),
     ("provenance",      "provenance",
      "a hand-supplied mapping older than the data it maps was never checked for staleness"),
 ]
@@ -562,8 +678,22 @@ def main():
     else:
         for name, why in not_run(spec):
             print("--    %s (NOT RUN: %s)" % (name, why))
+        # How much a passing check actually examined belongs in the DEFAULT output. Printing
+        # fields only on failure meant `match_rate: 0.0`, `columns_compared: []` and a
+        # neutralising `allow_missing: 99999` all lived in --json, which nobody runs, while
+        # the human read one reassuring word. An escape hatch that hides when it works is
+        # not an escape hatch, it is a blind spot.
+        EVIDENCE = ("rows_compared", "columns_compared", "compared", "match_rate",
+                    "min_match_rate", "rows_checked", "source_rows_selected",
+                    "missing_in_destination", "allow_missing", "allow_unmatched",
+                    "unmatched_in_source", "columns_checked", "source_rows")
         for r in results:
             print(("FAIL  " if not r.get("ok", True) else "ok    ") + r["check"])
+            if r.get("ok", True):
+                shown = ["%s=%s" % (k, json.dumps(r[k])) for k in EVIDENCE
+                         if k in r and r[k] not in (None, True)]
+                if shown:
+                    print("        " + "  ".join(shown)[:150])
             if not r.get("ok", True):
                 # cases-shaped checks print each FAILING case's fields, not one blob
                 multi = "cases" in r
