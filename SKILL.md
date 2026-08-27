@@ -491,6 +491,24 @@ is sane. It can only know whether you declared one. **Presence of a decision is 
 its correctness is not** - and pretending otherwise would be the same green-on-wrong trap the
 rest of this file exists to prevent.
 
+**The escape hatches, and what declaring one costs you.** Every check that can block has a
+declared way past it, because a checker that cannot express a legitimate exception gets
+switched off entirely. Each is a claim you are making, recorded in the output:
+
+| declare | means | use when |
+|---|---|---|
+| `key.allow_missing: N` | up to N source rows legitimately never reached the destination | a scoped or phased load, soft deletes excluded |
+| `key.allow_unmatched: N` | up to N destination rows legitimately have no source row | rows the destination generates itself |
+| `key.identity.min_match_rate` | a match rate below 1.0 is acceptable | almost never - a partial match means some rows are on the wrong entity |
+| `counterexamples[].allow_no_match` | the hypothesis genuinely does not arise in this data | after checking it is not a value mismatch (`"1"` against a column holding `"true"`) |
+| `contract[col].sentinels: false` | this column's sentinel-looking values are real | `"NA"` is Namibia, not "not applicable" |
+| `coverage.skipped` / `deferred` | this many rows were deliberately not transformed | any partial load, always with the reason written down |
+| `allow_empty` | an empty input is expected | almost never - an empty extract passes every check by having nothing to fail |
+
+Declaring one is legitimate. Setting it to a number that makes the check unfalsifiable is the
+same thing as deleting the check, and the output prints the value so a reviewer can see which
+you did.
+
 Exit codes: **0** = every declared check passed; **1** = a check FAILED - a block, because
 the transform is not proven; **2** = the spec itself is invalid. CSV in, so it runs against
 an extract, in CI, or against a fixture with no database driver.

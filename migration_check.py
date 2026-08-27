@@ -50,7 +50,7 @@ def read(path):
         return list(csv.DictReader(f))
 
 
-SENTINEL_STRINGS = {"nan", "null", "none", "nil", "n/a", "na", "undefined", "-"}
+SENTINEL_STRINGS = {"nan", "null", "none", "nil", "n/a", "undefined"}
 
 
 def _is_sentinel(v):
@@ -127,7 +127,7 @@ def validate_spec(spec):
                 errors.append("coverage.%s must be a non-negative integer, got %r" % (k, v))
     key = spec.get("key")
     if key is not None:
-        _unknown_keys(errors, "key", key, {"source", "destination", "identity", "allow_unmatched"})
+        _unknown_keys(errors, "key", key, {"source", "destination", "identity", "allow_unmatched", "allow_missing"})
         for req in ("source", "destination"):
             if req not in key:
                 errors.append("key: missing %r" % req)
@@ -216,6 +216,7 @@ def _dest_map(dst, dk, value=None):
 
 
 def check_key_identity(src, dst, key_spec):
+    allow_missing = int(key_spec.get("allow_missing", 0) or 0)
     """An id present in both systems is not evidence it MEANS the same thing. Compare an
     INDEPENDENT human-readable attribute; a low match rate is a re-keyed migration.
     The threshold is explicit and defaults to 1.0 - a silent tolerance is how 1% of rows
@@ -253,10 +254,12 @@ def check_key_identity(src, dst, key_spec):
             # A source row the destination never received cannot have "matched". This
             # number was already computed and discarded, so 999 of 1000 rows missing
             # reported ok on a 100% match rate over the 1 that landed.
-            "ok": compared > 0 and rate >= threshold and missing == 0}
+            "allow_missing": allow_missing,
+            "ok": compared > 0 and rate >= threshold and missing <= allow_missing}
 
 
 def check_reconciliation(src, dst, rec, key_spec, mapped):
+    allow_missing = int(key_spec.get("allow_missing", 0) or 0)
     """Reconcile BY VALUE over the full population - step 5, executable. Row counts,
     keys, coverage and contract all pass while one mapped column's VALUES silently
     diverged; only comparing the landed value against the source, row by row, sees it.
@@ -310,7 +313,9 @@ def check_reconciliation(src, dst, rec, key_spec, mapped):
             # Three ways to compare nothing and call it success: no rows, no columns
             # (a typo in reconcile.columns silently empties the pair list), and rows
             # the destination never received.
-            "ok": rows_compared > 0 and bool(pairs) and total == 0 and missing == 0}
+            "allow_missing": allow_missing,
+            "ok": rows_compared > 0 and bool(pairs) and total == 0
+                  and missing <= allow_missing}
 
 
 def check_column_coverage(src, dst, spec):
@@ -366,8 +371,16 @@ def check_contract(dst, contract):
         vals = [r.get(col, "") for r in dst]
         # A sentinel string is present as text and absent in meaning: "None", "NULL", "nan".
         # Counting it as present let every required column pass while holding no value.
-        present = [v for v in vals if v not in (None, "") and not _is_sentinel(v)]
-        sentinels = [v for v in vals if v not in (None, "") and _is_sentinel(v)]
+        # A value the spec DECLARED valid is not a sentinel, whatever it looks like: an enum
+        # listing "NA" means Namibia, and the tool does not get to overrule the declaration.
+        declared = {str(x) for x in (rule.get("values") or [])}
+        sentinel_on = rule.get("sentinels", True)
+
+        def _sent(v):
+            return sentinel_on and str(v) not in declared and _is_sentinel(v)
+
+        present = [v for v in vals if v not in (None, "") and not _sent(v)]
+        sentinels = [v for v in vals if v not in (None, "") and _sent(v)]
         viol = []
         if sentinels:
             viol.append({"rule": "sentinel", "rows": len(sentinels),
@@ -424,8 +437,14 @@ def check_counterexamples(src, cases):
                 hits += 1
         # selected == 0 means source_when matched no rows: the hypothesis was never
         # actually tested, which is not the same as surviving the test
+        # selected == 0 means source_when matched nothing. Usually a VALUE mismatch the
+        # column-name check cannot see - "1" against a column holding "true" - and a
+        # hypothesis never tested is not one that survived. Where the condition genuinely
+        # does not arise in this dataset, say so with allow_no_match.
+        allow_none = bool(c.get("allow_no_match"))
         out.append({"name": c.get("name", "?"), "source_rows_selected": selected,
-                    "contradicting_rows": hits, "ok": hits == 0 and selected > 0})
+                    "allow_no_match": allow_none, "contradicting_rows": hits,
+                    "ok": hits == 0 and (selected > 0 or allow_none)})
     return {"check": "counterexamples", "cases": out, "ok": all(c["ok"] for c in out)}
 
 
