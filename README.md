@@ -1,5 +1,7 @@
 # data-migration
 
+[![tests](https://github.com/shaheershoaib/data-migration/actions/workflows/test.yml/badge.svg)](https://github.com/shaheershoaib/data-migration/actions/workflows/test.yml)
+
 Prove a data migration actually landed correctly, on the destination, where the
 evidence is.
 
@@ -54,10 +56,12 @@ money received.
 
 ```
 FAIL  exclusivity-precedence
+      case: a reversal beats a settle-flag - a bounced payment is not money received
         rows_checked: 4
         source_contradictions: 2      <- the legacy system's mess, reported
         precedence_violations: 2      <- YOUR transform resolved these the wrong way round
-        examples: [{"key": "1", "matched": ["reversed","settled"],
+        missing_in_destination: 0
+        examples: [{"key": "1", "matched": ["reversed", "settled"],
                     "expected": "REVERSED", "got": "SETTLED"}]
 ```
 
@@ -71,18 +75,24 @@ Declare only what applies. Each section of the spec is optional.
 
 | check | catches |
 |---|---|
-| `exclusivity-precedence` | two mutually exclusive states on one row, and whether the transform let the right one win |
-| `key-uniqueness` | a natural key that maps N:1 and silently resolves to whichever row it hits first |
-| `key-identity` | an id present in both systems that does not mean the same thing, scored against an independent human-readable attribute |
+| `exclusivity-precedence` | two mutually exclusive states on one row, and whether the transform let the right one win - and every affected row the destination never received, counted rather than silently skipped (`allow_missing` declares deliberate skips) |
+| `key-uniqueness` / `key-uniqueness-destination` | a natural key that maps N:1, a blank/sentinel key that cannot join - and, on the destination side, a double-applied load minting duplicate keys while every value stays right |
+| `key-identity` | an id present in both systems that does not mean the same thing, scored against an independent human-readable attribute - the threshold is explicit (`min_match_rate`, default 1.0) and printed, never a silent tolerance |
+| `value-reconciliation` | a mapped column whose landed VALUES silently diverged from the source - compared row by row, column by column, over the full population (step 5, executable); blank or duplicated destination keys are excluded and counted, never resolved last-seen-wins |
 | `column-coverage` | a field that was never carried, invisible to any row count |
-| `grain` | a one-to-many flattened to one-to-one, which destroys information while every count still reconciles |
-| `destination-contract` | types, enum membership, required-ness, ranges, all-NULL columns, especially where the destination does not enforce them itself |
-| `counterexamples` | an inferred field meaning, stated as a hypothesis and refuted by a query |
-| `provenance` | a hand-supplied mapping artifact older than the data it maps, stale by construction |
-| `row-census` | the baseline, which proves the least and is reported first so it is never mistaken for the answer |
+| `coverage-summation` | transformed + skipped + deferred failing to sum to the input - the silent subset that "ran clean" |
+| `grain` | a one-to-many flattened to one-to-one, which destroys information while every count still reconciles - and the reverse fan-out, a load applied twice |
+| `destination-contract` | types (int, number, ISO date, enum), required-ness, min/max ranges, all-NULL columns, especially where the destination does not enforce them itself |
+| `counterexamples` | an inferred field meaning, stated as a hypothesis and refuted by a query (`when` values take a scalar or a list) |
+| `provenance` | a hand-supplied mapping artifact older than the data it maps, stale by construction - an entry missing a date, or carrying a non-ISO one, fails rather than silently passing |
+| `row-census` | the baseline, which proves the least and is reported first so it is never mistaken for the answer - it blocks only when a declared input has ZERO rows (the wrong-WHERE extract), unless `allow_empty` says that is deliberate |
 
-It exits **non-zero on any failure**. A failing check is a block, because the
-transform is not proven.
+The spec itself is validated: an unknown section, contract type, or rule key is a spec
+error, never a silent skip - a typo'd check is a check that never runs while the run
+looks green.
+
+Exit codes: **0** = every declared check passed, **1** = a check failed (a block,
+because the transform is not proven), **2** = the spec is invalid.
 
 ## The false-block guard
 
@@ -92,13 +102,17 @@ is caught. It also runs a **clean** fixture that must produce zero findings:
 ```
 ok    row-census
 ok    key-uniqueness
+ok    key-uniqueness-destination
 ok    key-identity
+ok    value-reconciliation
 ok    column-coverage
+ok    coverage-summation
 ok    grain
 ok    destination-contract
+ok    counterexamples
 ok    provenance
 
-0/7 checks failed
+0/11 checks failed
 ```
 
 That second half matters as much as the first. A checker that cries wolf gets

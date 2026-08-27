@@ -15,6 +15,27 @@ review-and-release process - the output still crosses review, CI and deploy like
 change. What lives here is the discipline that process cannot supply, because no test on
 the changed code can tell you the data it produced is wrong.
 
+## The loop at a glance
+
+The `mechanical` column names the spec section in `migration_check.py` that makes the
+check executable; everything else is judgment the steps below carry.
+
+| step | the question it answers | mechanical |
+|---|---|---|
+| Reach | can you read, move and write end to end - and what does the path cost? | - |
+| 0 census | what mess does the source actually contain? | `key` (uniqueness), `contract` on an extract |
+| 1 contract | what does the destination require - and what does it actually ENFORCE? | `contract` |
+| 2 semantics | does each field mean what its name says? | `counterexamples` |
+| 2b exclusivity | when a row asserts two states, which one wins? | `exclusivity` |
+| 3 keys | do the join keys mean the same thing in both systems? | `key` + `identity` |
+| 3b fallbacks | what happens to values that cannot be mapped? | - |
+| 4 coverage | is every row, column and grain accounted for? | `columns`, `grain`, `coverage` |
+| 5 reconcile | do the landed values match the source, over the FULL population? | `reconcile` |
+| 6 scope | can the load touch only what it owns - and what does the destination DO on write? | - |
+| 6b scale | does it complete at production size, and can it resume? | - |
+| 6c classes | is the defect's whole CLASS empty, not just the reported row? | - |
+| 7 close-out | can you show destination-side evidence, not a run log? | - |
+
 ---
 
 ## First - can you REACH both systems, and what does that path cost?
@@ -64,6 +85,9 @@ inconsistencies becomes a silent defect downstream. Before writing any mapping, 
 - **Orphans and dangling references.** Rows whose parent no longer exists.
 - **Type reality.** A column typed `varchar` that holds numbers will parse - until the one
   row that does not. Money and dates are where this bites.
+- **Encoding reality.** Mojibake and double-encoded UTF-8 (`Ã©` where `é` belongs) survive
+  every row count and most contracts. Census the non-ASCII values in name-like columns
+  before the extract locks them in.
 - **Duplicates and near-duplicates** on the natural identity.
 
 Write the census down. It is the evidence for every scoping decision that follows, and it
@@ -81,6 +105,12 @@ date parsing, implicit truncation - each means the store will accept wrong data 
 success. **The weaker the enforcement, the more the burden of proof sits on your own
 validation**, and the less a clean load tells you.
 
+The contract includes what the APPLICATION enforces on its own writes, not just the schema:
+a direct load bypasses ORM validation, model defaults, normalization and stamping
+(created_by, timestamps). Either replicate those in the transform, or record that migrated
+rows are deliberately distinguishable - a decision made on the record, not a gap found
+later.
+
 ## Step 2 - derive SEMANTICS from behaviour, not names
 
 A field's meaning comes from what the producing system DOES with it, never from what it is
@@ -95,9 +125,7 @@ supports the inference; any rows refute it, and the count tells you the blast ra
 
 This is the single cheapest check in the whole loop. "Is this flag really what it says?"
 becomes `WHERE looks_successful = 1 AND authoritative_status IN (<failure states>)` - one
-query, an exact number, no opinion. A flag whose name promised success but was set on
-submission and never cleared on failure returns tens of thousands of rows here, in seconds,
-before a single row is migrated.
+query, an exact number, no opinion, in seconds, before a single row is migrated.
 
 ## Step 2b - resolve MUTUALLY EXCLUSIVE states, and declare which one wins
 
@@ -249,6 +277,17 @@ it. The transform is correct in isolation and still breaks the system, which is 
 a row-level review never catches it. Identify the in-flight states before the write and
 exclude them.
 
+**Know what the destination DOES on write before a bulk load.** Triggers, webhooks,
+notification sends, audit hooks, denormalized recomputes: a load that fires per-row side
+effects is an incident, not a migration - two million rows can be two million emails.
+Enumerate the write-path side effects, disable or route around them deliberately, and
+re-enable afterwards, with both halves on the record.
+
+**Reset the destination's id sequences after loading explicit keys.** Auto-increment and
+sequence counters do not follow explicit inserts everywhere; the first application insert
+after cut-over collides with a migrated id. No check on the migrated data can see this
+defect - it lives in FUTURE rows - so it has to be a step, not a finding.
+
 Destructive operations get a restore path proven BEFORE they run, not discovered after.
 
 ## Step 6b - rehearse at PRODUCTION SCALE, and make the run resumable
@@ -285,6 +324,15 @@ bug:
   meeting a negative value, or a value exceeding a width, can fail the entire statement -
   clamp or validate before the write, and know which failures are per-row and which are
   fatal to the batch.
+- **Name the columns in every load statement.** A positional LOAD/COPY silently shears when
+  the file and the table disagree on column order: every value lands, every count
+  reconciles, and each field holds its neighbour's data. Explicit column lists are one
+  line of ceremony against a whole-table defect.
+- **Plan the DELTA before the load, not after.** Everything created in the source after the
+  snapshot is invisible to it (see Reach). Either freeze the source for the window - and
+  say so - or name a delta pass that re-runs this same loop over rows created since, and
+  reconcile AFTER cut-over against the frozen source: that is the one moment both sides
+  are supposed to be equal.
 
 **Keep schema (DDL) and data (DML) as separate migrations.** They have different risk,
 different rollback, and different rehearsal needs; bundling them means a data defect forces
@@ -318,23 +366,38 @@ honest downgrade rather than calling it done.
 
 ## Running the mechanical checks
 
-Most of this loop is judgment. Seven of the checks are not - they are queries whose answer
-is a number, and they are executable. They live in `migration_check.py`, beside this file:
+Most of this loop is judgment. The mechanical minority is not - each of those checks is a
+query whose answer is a number, and they are executable. They live in `migration_check.py`,
+beside this file:
 
 ```bash
 python3 migration_check.py --spec spec.json
 ```
 
-Declare only what applies; each section is optional. It checks **mutually-exclusive state precedence** (did the transform let the right flag win), **key uniqueness** (a natural
-key mapping N:1), **key identity** (match rate against an independent attribute), **column
-coverage** (every source column mapped / dropped / defaulted), **grain** (children-per-parent
-on both sides), the **destination contract** (types, enums, required, all-NULL), your
-**counterexample queries** (an inferred meaning is a hypothesis), and **provenance** (an
-artifact older than the data it maps is stale by construction).
+Declare only what applies; each section is optional - but what you DECLARE is validated: an
+unknown section, contract type, or rule key is a spec error (exit 2), never a silent skip,
+because a typo'd check is a check that never runs while the run looks green. It checks
+**mutually-exclusive state precedence** (did the transform let the right flag win - and
+every affected row the destination never received is counted and fails, unless an
+`allow_missing` allowance declares the skips deliberate), **key uniqueness on BOTH sides**
+(a natural key mapping N:1, a blank/sentinel key, and - on the destination - a
+double-applied load minting duplicates), **key identity** (match rate against an
+independent attribute, with the threshold explicit in the spec and 1.0 by default),
+**value reconciliation** (the landed values compared against the source row by row over
+the full population - step 5, executable; blank or duplicated destination keys are
+excluded and counted, never resolved last-seen-wins), **column coverage** (every source
+column mapped / dropped / defaulted), **coverage summation** (transformed + skipped +
+deferred must equal the input), **grain** (children-per-parent in both directions,
+catching collapse AND fan-out), the **destination contract** (int/number/ISO-date/enum,
+required, min/max, all-NULL), your **counterexample queries** (an inferred meaning is a
+hypothesis), and **provenance** (an artifact older than the data it maps is stale by
+construction - and an entry missing a date, or carrying a non-ISO one, fails rather than
+silently passing). A declared input with ZERO rows is a block too, unless `allow_empty`
+says it is deliberate - an empty extract is the wrong-WHERE clause wearing a clean run.
 
-It exits **non-zero on any failure** - a failing check is a block, because the transform is
-not proven. CSV in, so it runs against an extract, in CI, or against a fixture with no
-database driver.
+Exit codes: **0** = every declared check passed; **1** = a check FAILED - a block, because
+the transform is not proven; **2** = the spec itself is invalid. CSV in, so it runs against
+an extract, in CI, or against a fixture with no database driver.
 
 **Run the CHECKS before the extract; the script is a backstop, not the first line.** These
 are a discipline first and a script second, and the moment they pay is BEFORE you trust an
