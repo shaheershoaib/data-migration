@@ -111,12 +111,20 @@ python3 tests/test_migration_check.py
 ## The discipline
 
 `SKILL.md` is the full loop, and most of it is judgment the tool cannot supply:
-census the source's mess before designing the transform, derive the contract from
-the destination and enumerate what it actually *enforces*, derive semantics from
-behaviour rather than names, prove the join keys before any bulk operation, state
-coverage as in-scope / transformed / skipped, reconcile by value over the full
-population rather than a sample, scope the load so it cannot destroy what the
-destination owns, and rehearse at production *size* rather than production shape.
+prove you can reach and write to both systems before designing anything, census the
+source's mess, derive the contract from the destination and enumerate what it
+actually *enforces*, derive semantics from behaviour rather than names, prove the
+join keys before any bulk operation, decide deliberately what happens to values that
+cannot be mapped, state coverage as in-scope / transformed / skipped, reconcile by
+value over the full population rather than a sample, scope the load so it cannot
+destroy what the destination owns, and rehearse at production *size* rather than
+production shape.
+
+Two of those exist because a migration across two systems breaks advice that holds
+inside one. There is often no shared surrogate key to fall back on when a natural key
+turns out non-unique, because ids get re-sequenced at migration; and the transfer path
+itself, when source and destination sit on different networks, is routinely the largest
+unbudgeted cost in the job.
 
 It is written as a Claude Code skill, so an agent loads it automatically when it
 recognises migration work. It reads perfectly well as a checklist for a human.

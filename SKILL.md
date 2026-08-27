@@ -17,6 +17,32 @@ the changed code can tell you the data it produced is wrong.
 
 ---
 
+## First - can you REACH both systems, and what does that path cost?
+
+Every step below assumes you can query the source, query the destination, and write to
+it. When the two live on different networks that assumption is the largest unbudgeted
+cost in the whole job, and it is discovered late, under time pressure, in the middle of
+a load.
+
+Establish the path FIRST, and time it:
+
+- **Prove the read and the write end to end before designing the transform** - a trivial
+  round trip, one row out and one row back, through the exact channel the real load will
+  use. A path that works for a SELECT can fail for a write: execution channels vary in
+  whether they allocate a terminal, how large a payload they accept, and how long they
+  stay open.
+- **Let the channel constrain the design, not the other way round.** Payload caps and
+  time limits decide batch size and whether the transform runs where the data is or where
+  you are. Discovering the cap mid-load turns a transform into an outage.
+- **An extract that crosses a boundary is a point-in-time SNAPSHOT.** Record when it was
+  taken. Everything created in the source afterwards is invisible to it, which is the same
+  staleness trap as a hand-supplied mapping artifact, arriving by a different route.
+
+If the path is slow or fragile, that is a fact about the migration, not an obstacle to
+push past quietly. Budget it.
+
+---
+
 ## Step 0 - census the source's MESS before designing the transform
 
 Legacy data is inconsistent in ways its schema does not admit, and every one of those
@@ -106,6 +132,48 @@ number, a natural key - and state the match rate. A wrong key does not fail loud
 produces a complete-looking result in which every row is attached to the wrong entity, and
 that is indistinguishable from success without this check.
 
+**Across two systems there is often no shared surrogate at all.** "If the natural key is
+not unique, join on the surrogate id" is within-database advice: ids get re-sequenced at
+migration, so the destination's id and the source's id are unrelated even where both
+exist. That leaves the case with no clean answer - a natural key that maps N:1, and no
+surrogate to fall back to.
+
+Do not resolve it by picking a match. Instead:
+
+1. **Partition the rows by whether the key is ambiguous**, and count both sides. Ambiguity
+   is usually concentrated, not spread: placeholder and filler values (repeated digits,
+   empty-equivalents, a default the legacy UI wrote when the field was skipped) generate
+   most of the collisions, and they are recognisable.
+2. **Land the unambiguous rows now.** They are the majority and they are provable.
+3. **Re-key the ambiguous ones through a higher-grain parent** that IS unambiguous - the
+   owning entity one level up - and treat them as a separate phase with its own evidence.
+   A parent-scoped match is a weaker claim than a direct key match, so it earns its own
+   verification rather than riding along with the clean rows.
+4. **Report the deferred count as part of coverage.** A phase you named is a decision; a
+   phase you silently dropped is the "it ran clean over a subset" failure wearing a
+   different hat.
+
+## Step 3b - decide the FALLBACK for values that cannot be mapped
+
+The census finds values with nowhere to land: outside the destination's enum, malformed,
+or absent. Finding them is not the decision. What happens to those rows is, and left
+unstated it gets made row-by-row by whatever the code does when a lookup misses - usually
+NULL, or a default nobody chose.
+
+- **Count the affected rows before choosing.** A fallback applied to nine rows and one
+  applied to nine thousand are different decisions, and the count is what tells you which
+  one you are making.
+- **Prefer DERIVING the value from an authoritative related record over a constant.** A
+  child row missing a dimensional value can often inherit it from its parent, which is
+  both more likely correct and re-derivable later. A hardcoded default is unfalsifiable
+  after the fact: nothing distinguishes a row that genuinely held that value from a row
+  that fell back to it.
+- **Mark fallen-back rows so they stay identifiable**, or record their keys. Otherwise the
+  decision dissolves into the data and cannot be revisited when someone asks how many rows
+  were guessed.
+- **Never let unmappable mean silently skipped.** Every row is transformed, deliberately
+  fallen back, or skipped with a counted reason. Those three must sum to the input.
+
 ## Step 4 - transform, and state COVERAGE
 
 Report rows **in scope / transformed / skipped**, with the reason for each skip. "It ran
@@ -183,8 +251,10 @@ correct it with a new one rather than editing history that other environments al
 
 The receipt is the destination-side evidence, not the run log:
 - the contract asserted, and what the destination does/does not enforce
-- key uniqueness + match-rate against an independent attribute
-- the coverage census (in scope / transformed / skipped + reasons)
+- key uniqueness + match-rate against an independent attribute, and the count of rows
+  deferred as ambiguous rather than matched by guess
+- the coverage census (in scope / transformed / skipped + reasons), and the count of rows
+  that took a fallback rather than a mapped value
 - the full-population value reconciliation (mismatch count)
 - spot checks BY VALUE on representative LEGACY and edge rows, not only freshly-created ones
 
