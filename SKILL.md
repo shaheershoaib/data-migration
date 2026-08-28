@@ -1,6 +1,6 @@
 ---
 name: data-migration
-description: Use when moving or reshaping DATA rather than code - a legacy-system migration, a backfill, a bulk import, an ETL, a re-keying, or a one-off correction script over existing rows. Triggers on "migrate the data", "backfill X", "import from the old system", "reconcile the migration", "why is this row wrong since the migration". NOT for schema-only DDL with no data movement (that is an ordinary schema change, handled by expand/contract), and NOT for code-wide mechanical sweeps like a codemod or rename (that is a mechanical code sweep). The defining property: the correctness of the output cannot be observed from the input, so the whole discipline is about proving it on the destination.
+description: Use when moving or reshaping DATA rather than code - a legacy-system migration, a backfill, a bulk import, an ETL, a re-keying, or a one-off correction script over existing rows. Triggers on "migrate the data", "backfill X", "import from the old system", "reconcile the migration", "why is this row wrong since the migration". NOT for schema-only DDL with no data movement (that is an ordinary schema change, handled by expand/contract), and NOT for code-wide mechanical sweeps like a codemod or rename (that is a mechanical code sweep). Applies to any store - relational, document, key-value, warehouse - and to moves between kinds. The defining property: the correctness of the output cannot be observed from the input, so the whole discipline is about proving it on the destination.
 ---
 
 # data-migration (the work-type loop for moving data)
@@ -103,6 +103,37 @@ inconsistencies becomes a silent defect downstream. Before writing any mapping, 
 
 Write the census down. It is the evidence for every scoping decision that follows, and it
 is what makes a later "we did not know" false.
+
+## Step 0b - if either side is SCHEMALESS, census the SHAPE as well as the values
+
+Everything above assumes a fixed set of fields. A document store does not give you one, and
+the discipline has to census the shape itself. Where the source is documents, or the
+destination is:
+
+- **Field ABSENCE is data, and it is not the same as null.** In a table every row has every
+  column; in a collection a field can be missing on 30% of documents, and "missing", "null"
+  and "empty string" are three different states that a naive transform collapses into one.
+  Count each field's presence rate across the whole collection before mapping it, and decide
+  per field which of the three the destination should hold.
+- **A field's TYPE varies between documents.** The same key holds a string on old documents
+  and a number on newer ones, or a single object where later writes put an array. Census the
+  distinct types per field, not just the distinct values - a destination with real types
+  rejects the minority, and one without silently stores both.
+- **Embedded collections are the grain**, and they are where the flattening defect lives. An
+  array that loses a member is invisible to every document count: the document is present,
+  its identifier matches, and one order or one line item is gone. Assert the LENGTH of every
+  embedded array on both sides, per document.
+- **Denormalized copies must ALL be updated.** Without joins, the same customer name may be
+  embedded in a thousand order documents. Fixing the customer record fixes nothing the reader
+  sees. Enumerate every place a value is copied and reconcile each - this is the twin sweep,
+  and in a document store it is the normal case rather than the exception.
+- **Ordering inside an array is usually meaningful** and is trivially lost by a transform
+  that rebuilds rather than copies. Compare arrays as sequences, not as sets, unless you have
+  established the order carries no meaning.
+
+`migration_check.py` reads JSONL and JSON as well as CSV, and addresses nested fields by
+dotted path (`address.city`), so every check below applies unchanged. Arrays are compared
+both as content and as a `field[]` length, which is what catches the lost member.
 
 ## Step 1 - derive the contract from the DESTINATION
 

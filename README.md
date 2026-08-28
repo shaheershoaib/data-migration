@@ -11,7 +11,8 @@ where they are, plus `migration_check.py`, which makes the mechanical half
 executable.
 
 Pure Python standard library: no dependencies, no network, no database driver.
-CSV in, so it runs against an extract, in CI, or against a fixture.
+CSV, JSONL or JSON in - the format is the transport, not the database - so it runs
+against an extract, in CI, or against a fixture.
 
 ```bash
 python3 migration_check.py --spec spec.json
@@ -163,7 +164,7 @@ validator: an assertion in the project's own test runner survives after the
 migration is over, and a one-off script does not. This tool is for the case where
 there is no such framework yet, or the migration is happening before one exists.
 
-It is deliberately CSV-only, and the checks matter most *before* the extract exists.
+The checks matter most *before* the extract exists.
 Run them on the source however you can query it; the script is the backstop for what
 you pulled, not the first line of defence. Across two systems behind different drivers
 there is no single connection that spans both, which is why a live-connection mode

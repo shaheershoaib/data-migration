@@ -525,5 +525,55 @@ class SilenceIsNotAPass(unittest.TestCase):
         self.assertTrue(all(n["why"] for n in out["not_run"]), "each absence states its cost")
 
 
+class DocumentStoresWork(unittest.TestCase):
+    """The format is the transport, not the database.
+
+    A document store's extract is JSONL, and flattening it to CSV destroys the nesting that
+    has to be verified. Dotted paths keep every check working unchanged; an array carries
+    both its content and a `[]` length, which is what catches a silently dropped member.
+    """
+
+    def _run(self, src_docs, dst_docs, spec_extra):
+        d = tempfile.mkdtemp()
+        s, dpath = os.path.join(d, "s.jsonl"), os.path.join(d, "d.jsonl")
+        for path, docs in ((s, src_docs), (dpath, dst_docs)):
+            with open(path, "w", encoding="utf-8") as fh:
+                for doc in docs:
+                    fh.write(json.dumps(doc) + "\n")
+        spec = dict({"source": s, "destination": dpath}, **spec_extra)
+        sp = os.path.join(d, "spec.json")
+        with open(sp, "w", encoding="utf-8") as fh:
+            json.dump(spec, fh)
+        return run_path(sp)
+
+    SPEC = {"key": {"source": "_id", "destination": "legacy_id"},
+            "columns": {"mapped": {"_id": "legacy_id", "name": "name",
+                                   "address.city": "address.city",
+                                   "orders": "orders", "orders[]": "orders[]"}},
+            "reconcile": {}}
+
+    def test_a_dropped_array_member_is_caught(self):
+        src = [{"_id": "u1", "name": "A", "address": {"city": "Lisbon"},
+                "orders": [{"n": 1}, {"n": 2}]}]
+        dst = [{"legacy_id": "u1", "name": "A", "address": {"city": "Lisbon"},
+                "orders": [{"n": 1}]}]
+        res, r = self._run(src, dst, self.SPEC)
+        rec = by_name(res, "value-reconciliation")
+        self.assertFalse(rec["ok"])
+        self.assertIn("orders[]", rec["mismatches_by_column"])
+        self.assertEqual(r.returncode, 1)
+
+    def test_a_dropped_nested_field_is_caught_by_dotted_path(self):
+        src = [{"_id": "u1", "name": "A", "address": {"city": "Lisbon"}, "orders": []}]
+        dst = [{"legacy_id": "u1", "name": "A", "address": {}, "orders": []}]
+        res, _ = self._run(src, dst, self.SPEC)
+        self.assertIn("address.city", by_name(res, "value-reconciliation")["mismatches_by_column"])
+
+    def test_a_faithful_document_migration_passes(self):
+        docs = [{"_id": "u1", "name": "A", "address": {"city": "Lisbon"}, "orders": [{"n": 1}]}]
+        dst = [{"legacy_id": "u1", "name": "A", "address": {"city": "Lisbon"}, "orders": [{"n": 1}]}]
+        _, r = self._run(docs, dst, self.SPEC)
+        self.assertEqual(r.returncode, 0, "a correct document migration must not be blocked")
+
 if __name__ == "__main__":
     unittest.main()

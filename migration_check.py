@@ -45,7 +45,50 @@ KNOWN_SECTIONS = {"source", "destination", "allow_empty", "key", "columns", "gra
 KNOWN_TYPES = {"int", "number", "date", "enum"}
 
 
+def flatten(doc, prefix=""):
+    """A nested document, addressed by dotted path, so every check below works on it.
+
+    A document store's records are not rows, and forcing them through CSV destroys exactly
+    what has to be verified: nesting, absence, and the difference between a field holding
+    null and a field that is not there. Flattening to dotted paths keeps all three -
+    `address.city` is a name a contract can assert on, a reconcile can compare, and a grain
+    can group by, with no change to any check.
+
+    Arrays are kept BOTH ways: the JSON text (so a value comparison sees element order and
+    content) and a `field[]` length (so a check can assert an embedded collection did not
+    silently lose members - the document-store version of the flattened-grain defect).
+    """
+    out = {}
+    for k, v in (doc or {}).items():
+        key = "%s%s" % (prefix, k)
+        if isinstance(v, dict):
+            out.update(flatten(v, key + "."))
+        elif isinstance(v, list):
+            out[key] = json.dumps(v, sort_keys=True, default=str)
+            out[key + "[]"] = len(v)
+        else:
+            out[key] = v
+    return out
+
+
 def read(path):
+    """CSV, JSONL or JSON. The format is the transport, not the database.
+
+    Any store can produce one of these; what matters is that the extract preserves the
+    shape. Use JSONL for anything with nested or optional fields, because CSV cannot
+    represent a missing field distinctly from an empty one, and that distinction is a real
+    defect class in a schemaless source.
+    """
+    ext = os.path.splitext(path)[1].lower()
+    if ext in (".jsonl", ".ndjson"):
+        with open(path, encoding="utf-8-sig") as f:
+            return [flatten(json.loads(line)) for line in f if line.strip()]
+    if ext == ".json":
+        with open(path, encoding="utf-8-sig") as f:
+            docs = json.load(f)
+        if isinstance(docs, dict):
+            docs = [docs]
+        return [flatten(d) for d in docs]
     with open(path, newline="", encoding="utf-8-sig") as f:
         return list(csv.DictReader(f))
 
