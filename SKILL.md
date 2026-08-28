@@ -551,9 +551,9 @@ channel reaches it. Waiting for a CSV inverts the order: by the time you have on
 already decided which rows and columns to pull, which is exactly what uniqueness, identity
 and coverage were supposed to inform. That ordering matters most in the case the script
 cannot serve at all - two systems behind different drivers and different channels, where no
-single connection spans both. The script stays deliberately CSV-only for that reason: a
-live-connection mode would need a driver per system, would still not span them, and would
-cost the property that lets this run anywhere with nothing installed.
+single connection spans both. The script stays deliberately EXTRACT-based for that reason - it reads CSV, JSONL or JSON and never connects to anything. A
+live-connection mode would need a driver per store, would still not span two of them, and
+would cost the property that lets this run anywhere with nothing installed.
 
 `tests/` seeds a fixture with one instance of every defect class above and asserts each is
 caught - plus a CLEAN fixture that must produce ZERO findings. That second half matters as
