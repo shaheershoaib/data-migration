@@ -126,8 +126,10 @@ python3 tests/test_migration_check.py
 ## The discipline
 
 `SKILL.md` is the full loop, and most of it is judgment the tool cannot supply:
-prove you can reach and write to both systems before designing anything, census the
-source's mess, derive the contract from the destination and enumerate what it
+locate the code that writes and reads each side before you read a schema (a schema is
+shape; the code is meaning) and record where each store is and how it is reached in a
+brief the project keeps, prove you can reach and write to both systems before designing
+anything, census the source's mess, derive the contract from the destination and enumerate what it
 actually *enforces*, derive semantics from behaviour rather than names, prove the
 join keys before any bulk operation, decide deliberately what happens to values that
 cannot be mapped, state coverage as in-scope / transformed / skipped, reconcile by
