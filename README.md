@@ -135,8 +135,9 @@ actually *enforces*, derive semantics from behaviour rather than names, prove th
 join keys before any bulk operation, decide deliberately what happens to values that
 cannot be mapped, state coverage as in-scope / transformed / skipped, reconcile by
 value over the full population rather than a sample, scope the load so it cannot
-destroy what the destination owns, and rehearse at production *size* rather than
-production shape.
+destroy what the destination owns, rehearse at production *size* rather than
+production shape, and size the depth of every step to the stakes without ever dropping
+the key proof, the coverage arithmetic or the by-value reconcile.
 
 Two of those exist because a migration across two systems breaks advice that holds
 inside one. There is often no shared surrogate key to fall back on when a natural key
