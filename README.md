@@ -87,6 +87,7 @@ Declare only what applies. Each section of the spec is optional.
 | `counterexamples` | an inferred field meaning, stated as a hypothesis and refuted by a query (`when` values take a scalar or a list) |
 | `provenance` | a hand-supplied mapping artifact older than the data it maps, stale by construction - an entry missing a date, or carrying a non-ISO one, fails rather than silently passing |
 | `row-census` | the baseline, which proves the least and is reported first so it is never mistaken for the answer - it blocks only when a declared input has ZERO rows (the wrong-WHERE extract), unless `allow_empty` says that is deliberate |
+| `merge-ledger` | when several sources feed one destination: every source row appears in the merge ledger exactly once (landed / merged / skipped / deferred), every merged row has one golden row, same-source merges were declared, and an independent attribute turns false merges into a failing count and false splits into a reported one |
 | `evidence-rung` | every semantic decision carries the intake rung it rests on (1 code read / 2 running system observed / 3 schema only): rung 1-2 names its source, rung 3 is blocked with its unblocker named, and a precedence applied through `exclusivity` must rest on rung 1 or 2 - `exclusivity` with no `evidence` section fails |
 
 The spec itself is validated: an unknown section, contract type, or rule key is a spec
@@ -137,7 +138,9 @@ cannot be mapped, state coverage as in-scope / transformed / skipped, reconcile 
 value over the full population rather than a sample, scope the load so it cannot
 destroy what the destination owns, rehearse at production *size* rather than
 production shape, and size the depth of every step to the stakes without ever dropping
-the key proof, the coverage arithmetic or the by-value reconcile.
+the key proof, the coverage arithmetic or the by-value reconcile - and, when several
+sources feed one destination, keep a merge ledger that proves every source row landed,
+merged, skipped or was deferred exactly once, with false merges and false splits counted.
 
 Two of those exist because a migration across two systems breaks advice that holds
 inside one. There is often no shared surrogate key to fall back on when a natural key

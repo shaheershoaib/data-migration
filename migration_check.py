@@ -41,7 +41,9 @@ from datetime import date, datetime
 
 KNOWN_SECTIONS = {"source", "destination", "allow_empty", "key", "columns", "grain",
                   "contract", "counterexamples", "exclusivity", "provenance",
-                  "reconcile", "coverage", "evidence"}
+                  "reconcile", "coverage", "evidence", "merge"}
+# What a merge ledger may say happened to a source row when several sources feed one destination.
+MERGE_ACTIONS = ("landed", "merged", "skipped", "deferred")
 KNOWN_TYPES = {"int", "number", "date", "enum"}
 # Where a semantic decision's evidence came from (the skill's intake ladder):
 #   1 = the code that writes/reads the store was read, 2 = the running system was observed,
@@ -232,6 +234,33 @@ def validate_spec(spec):
             if "kind" in d and d["kind"] not in KNOWN_DECISION_KINDS:
                 errors.append("evidence.decisions[%d]: unknown kind %r (known: %s)"
                               % (i, d["kind"], ", ".join(sorted(KNOWN_DECISION_KINDS))))
+    m = spec.get("merge")
+    if m is not None:
+        _unknown_keys(errors, "merge", m, {"ledger", "sources", "source_keys", "destination_key",
+                                           "identity", "allow_same_source_merges",
+                                           "max_conflicting_merges", "max_split_candidates",
+                                           "allow_destination_only"})
+        for req in ("ledger", "sources", "source_keys", "destination_key"):
+            if req not in m:
+                errors.append("merge: missing %r" % req)
+        if not spec.get("destination"):
+            errors.append("merge requires a top-level 'destination' (the consolidated store)")
+        srcs, keys = m.get("sources"), m.get("source_keys")
+        if not (isinstance(srcs, dict) and isinstance(keys, dict)):
+            errors.append("merge.sources and merge.source_keys must be objects keyed by source name")
+        elif set(srcs) != set(keys):
+            errors.append("merge.source_keys must name exactly the sources in merge.sources")
+        ident = m.get("identity")
+        if ident is not None:
+            _unknown_keys(errors, "merge.identity", ident, {"sources"})
+            known = set(srcs) if isinstance(srcs, dict) else set()
+            if not isinstance(ident.get("sources"), dict) or set(ident["sources"]) - known:
+                errors.append("merge.identity.sources must map names from merge.sources to the "
+                              "column holding the independent attribute")
+        for k in ("max_conflicting_merges", "max_split_candidates", "allow_destination_only"):
+            v = m.get(k)
+            if v is not None and (not isinstance(v, int) or isinstance(v, bool) or v < 0):
+                errors.append("merge.%s must be a non-negative integer, got %r" % (k, v))
     return errors
 
 
@@ -643,6 +672,132 @@ def check_evidence(spec):
             "cases": cases, "ok": all(c["ok"] for c in cases)}
 
 
+def check_merge(spec, dst, path):
+    """Several sources folded into one destination: does every source row appear in the merge
+    ledger exactly once, does every merged row have exactly one golden row, and do the two
+    SILENT consolidation errors show up as counts?
+
+    A FALSE MERGE (two real entities became one row) and a FALSE SPLIT (one entity stayed two
+    rows) both reconcile clean per source-destination pair: every value matches its own source.
+    The ledger - (source, source_key, destination_key, action) with action in landed / merged /
+    skipped / deferred - is the coverage arithmetic ACROSS sources: sum of source rows =
+    landed + merged + skipped + deferred, which is only checkable row by row. Given an
+    independent attribute per source (one the match rule did NOT use), merged groups whose
+    members disagree on it are false-merge candidates and FAIL past a declared allowance;
+    distinct landed rows that share it are false-split candidates, REPORTED, blocking only on a
+    declared threshold, because a shared attribute is a row to look at rather than proof.
+    A same-source merge (two rows of one system folded together) is an intra-source duplicate
+    decision and must be declared, not slipped into the cross-source match.
+    """
+    m = spec["merge"]
+    ledger = read(path(m["ledger"]))
+    dkey = m["destination_key"]
+    ident_cols = (m.get("identity") or {}).get("sources") or {}
+
+    def norm(v):
+        return (v or "").strip().casefold()
+
+    required = {"source", "source_key", "destination_key", "action"}
+    missing_cols = sorted(required - set(ledger[0].keys())) if ledger else sorted(required)
+    unknown_actions = sum(1 for r in ledger if r.get("action") not in MERGE_ACTIONS)
+    counts = {a: sum(1 for r in ledger if r.get("action") == a) for a in MERGE_ACTIONS}
+
+    sources_out, src_rows_by, source_rows_total = {}, {}, 0
+    for name, p in m["sources"].items():
+        rows = read(path(p))
+        kcol = m["source_keys"][name]
+        by_key = {r.get(kcol): r for r in rows if not _blank(r.get(kcol))}
+        src_rows_by[name] = by_key
+        headers = set(rows[0].keys()) if rows else set()
+        # a named column that is not in the file selects nothing and prints a reassuring
+        # zero; that is a spec-references finding, not a clean result
+        for label, col in ((name + "." + kcol, kcol), (name + "." + str(ident_cols.get(name)), ident_cols.get(name))):
+            if col and headers and col not in headers:
+                missing_cols.append(label)
+        source_rows_total += len(rows)
+        seen = {}
+        for r in ledger:
+            if r.get("source") == name:
+                seen[r.get("source_key")] = seen.get(r.get("source_key"), 0) + 1
+        missing = [k for k in by_key if k not in seen]
+        sources_out[name] = {"rows": len(rows), "ledger_rows": sum(seen.values()),
+                             "blank_keys": len(rows) - len(by_key),
+                             "missing_from_ledger": len(missing),
+                             "duplicated_in_ledger": sum(1 for n in seen.values() if n > 1),
+                             "not_in_source": sum(1 for k in seen if k not in by_key),
+                             "examples_missing": missing[:5]}
+
+    landed_by_dest, groups = {}, {}
+    for r in ledger:
+        a = r.get("action")
+        if a == "landed":
+            landed_by_dest.setdefault(r.get("destination_key"), []).append(r)
+        if a in ("landed", "merged"):
+            groups.setdefault(r.get("destination_key"), []).append(r)
+    merged_into_none = sum(1 for r in ledger if r.get("action") == "merged"
+                           and not landed_by_dest.get(r.get("destination_key")))
+    multiple_golden = sum(1 for v in landed_by_dest.values() if len(v) > 1)
+    dest_keys = {r.get(dkey) for r in dst if not _blank(r.get(dkey))}
+    landed_not_in_dest = sum(1 for k in landed_by_dest if k not in dest_keys)
+    destination_only = len(dest_keys - set(landed_by_dest))
+    same_source = 0
+    for members in groups.values():
+        per = {}
+        for r in members:
+            per[r.get("source")] = per.get(r.get("source"), 0) + 1
+        if any(n > 1 for n in per.values()):
+            same_source += 1
+
+    conflicting, conflict_examples, split_candidates = 0, [], 0
+    if ident_cols:
+        def attr(r):
+            row = src_rows_by.get(r.get("source"), {}).get(r.get("source_key"))
+            col = ident_cols.get(r.get("source"))
+            return norm(row.get(col)) if (row is not None and col) else ""
+        for k, members in groups.items():
+            if len(members) < 2:
+                continue
+            vals = {attr(r) for r in members} - {""}
+            if len(vals) > 1:
+                conflicting += 1
+                if len(conflict_examples) < 5:
+                    conflict_examples.append({"destination_key": k, "values": sorted(vals)})
+        by_attr = {}
+        for k, members in landed_by_dest.items():
+            for r in members:
+                a = attr(r)
+                if a:
+                    by_attr.setdefault(a, set()).add(k)
+        split_candidates = sum(1 for ks in by_attr.values() if len(ks) > 1)
+
+    allow_dest_only = int(m.get("allow_destination_only", 0) or 0)
+    max_conf = int(m.get("max_conflicting_merges", 0) or 0)
+    max_split = m.get("max_split_candidates")
+    per_source_ok = all(v["missing_from_ledger"] == 0 and v["duplicated_in_ledger"] == 0
+                        and v["not_in_source"] == 0 and v["blank_keys"] == 0
+                        for v in sources_out.values())
+    return {"check": "merge-ledger", "sources": sources_out, "source_rows": source_rows_total,
+            "landed": counts["landed"], "merged": counts["merged"], "skipped": counts["skipped"],
+            "deferred": counts["deferred"],
+            "arithmetic_holds": source_rows_total == sum(counts.values()),
+            "destination_rows": len(dest_keys), "destination_only": destination_only,
+            "allow_destination_only": allow_dest_only,
+            "merged_into_no_golden_row": merged_into_none, "multiple_golden_rows": multiple_golden,
+            "landed_not_in_destination": landed_not_in_dest,
+            "same_source_merges": same_source,
+            "allow_same_source_merges": bool(m.get("allow_same_source_merges")),
+            "conflicting_merges": conflicting, "max_conflicting_merges": max_conf,
+            "conflicting_merge_examples": conflict_examples,
+            "split_candidates": split_candidates, "max_split_candidates": max_split,
+            "unknown_actions": unknown_actions, "missing_columns": missing_cols,
+            "ok": (not missing_cols and unknown_actions == 0 and per_source_ok
+                   and merged_into_none == 0 and multiple_golden == 0 and landed_not_in_dest == 0
+                   and destination_only <= allow_dest_only
+                   and (same_source == 0 or bool(m.get("allow_same_source_merges")))
+                   and conflicting <= max_conf
+                   and (max_split is None or split_candidates <= max_split))}
+
+
 def check_provenance(entries):
     """An artifact older than the data it maps is stale by construction - it cannot know
     about anything created since. Staleness is invisible in the output. An entry missing
@@ -756,6 +911,10 @@ def run(spec, base="."):
         results.append(check_exclusivity(src, dst, spec["exclusivity"]))
     if spec.get("provenance") is not None:
         results.append(check_provenance(spec["provenance"]))
+    if spec.get("merge") is not None:
+        # not in OPTIONAL_CHECKS on purpose: a single-source spec has nothing to merge, and
+        # announcing it NOT RUN on every run is the false alarm that gets the table ignored
+        results.append(check_merge(spec, dst, path))
     if spec.get("evidence") is not None or spec.get("exclusivity") is not None:
         # exclusivity means a precedence was APPLIED, which forces the question of what
         # it rests on even when no evidence section was declared
@@ -848,7 +1007,8 @@ def main():
                     "missing_in_destination", "allow_missing", "allow_unmatched",
                     "unmatched_in_source", "columns_checked", "source_rows",
                     "source_rung", "destination_rung", "decisions", "derived", "observed",
-                    "blocked")
+                    "blocked", "landed", "merged", "skipped", "deferred", "destination_only",
+                    "same_source_merges", "conflicting_merges", "split_candidates")
         for r in results:
             print(("FAIL  " if not r.get("ok", True) else "ok    ") + r["check"])
             if r.get("ok", True):
