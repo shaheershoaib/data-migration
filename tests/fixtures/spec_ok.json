@@ -13,5 +13,9 @@
   "counterexamples": [{"name": "a clean hypothesis must not be flagged",
                        "source_when": {"state": "ACTIVE"},
                        "contradicted_by": {"state": ["BOGUS"]}}],
-  "provenance": [{"artifact": "grouping.csv", "dated": "2026-06-02", "data_extracted": "2026-06-01"}]
+  "provenance": [{"artifact": "grouping.csv", "dated": "2026-06-02", "data_extracted": "2026-06-01"}],
+  "evidence": {"source_rung": 1, "destination_rung": 1,
+               "decisions": [{"decision": "state ACTIVE/INACTIVE means what the legacy list screen filters on",
+                              "kind": "meaning", "rung": 1,
+                              "source": "legacy app: the list screen's filter and the state writer"}]}
 }

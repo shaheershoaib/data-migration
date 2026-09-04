@@ -87,6 +87,7 @@ Declare only what applies. Each section of the spec is optional.
 | `counterexamples` | an inferred field meaning, stated as a hypothesis and refuted by a query (`when` values take a scalar or a list) |
 | `provenance` | a hand-supplied mapping artifact older than the data it maps, stale by construction - an entry missing a date, or carrying a non-ISO one, fails rather than silently passing |
 | `row-census` | the baseline, which proves the least and is reported first so it is never mistaken for the answer - it blocks only when a declared input has ZERO rows (the wrong-WHERE extract), unless `allow_empty` says that is deliberate |
+| `evidence-rung` | every semantic decision carries the intake rung it rests on (1 code read / 2 running system observed / 3 schema only): rung 1-2 names its source, rung 3 is blocked with its unblocker named, and a precedence applied through `exclusivity` must rest on rung 1 or 2 - `exclusivity` with no `evidence` section fails |
 
 The spec itself is validated: an unknown section, contract type, or rule key is a spec
 error, never a silent skip - a typo'd check is a check that never runs while the run

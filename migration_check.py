@@ -41,8 +41,13 @@ from datetime import date, datetime
 
 KNOWN_SECTIONS = {"source", "destination", "allow_empty", "key", "columns", "grain",
                   "contract", "counterexamples", "exclusivity", "provenance",
-                  "reconcile", "coverage"}
+                  "reconcile", "coverage", "evidence"}
 KNOWN_TYPES = {"int", "number", "date", "enum"}
+# Where a semantic decision's evidence came from (the skill's intake ladder):
+#   1 = the code that writes/reads the store was read, 2 = the running system was observed,
+#   3 = schema only. A meaning cannot be derived at 3, so a rung-3 decision must be BLOCKED.
+KNOWN_RUNGS = (1, 2, 3)
+KNOWN_DECISION_KINDS = {"meaning", "precedence", "key", "fallback", "grain"}
 
 
 def flatten(doc, prefix=""):
@@ -203,6 +208,30 @@ def validate_spec(spec):
         for req in ("key", "destination_column", "states"):
             if req not in c:
                 errors.append("exclusivity[%d]: missing %r" % (i, req))
+    ev = spec.get("evidence")
+    if ev is not None:
+        _unknown_keys(errors, "evidence", ev, {"source_rung", "destination_rung", "decisions"})
+        for side in ("source_rung", "destination_rung"):
+            r = ev.get(side)
+            if r not in KNOWN_RUNGS or isinstance(r, bool):
+                errors.append("evidence.%s must be one of %s (1 code / 2 running system / "
+                              "3 schema only), got %r" % (side, KNOWN_RUNGS, r))
+        decisions = ev.get("decisions")
+        if not isinstance(decisions, list):
+            errors.append("evidence.decisions must be a list (empty is allowed)")
+        for i, d in enumerate(decisions or []):
+            # a confidence label, a note, a hunch: none of those is a rung, and a key the
+            # checker does not read would let a spec LOOK like it recorded evidence
+            _unknown_keys(errors, "evidence.decisions[%d]" % i, d,
+                          {"decision", "kind", "rung", "source", "blocked", "unblocked_by"})
+            if not d.get("decision"):
+                errors.append("evidence.decisions[%d]: missing 'decision'" % i)
+            if d.get("rung") not in KNOWN_RUNGS or isinstance(d.get("rung"), bool):
+                errors.append("evidence.decisions[%d]: rung must be one of %s, got %r"
+                              % (i, KNOWN_RUNGS, d.get("rung")))
+            if "kind" in d and d["kind"] not in KNOWN_DECISION_KINDS:
+                errors.append("evidence.decisions[%d]: unknown kind %r (known: %s)"
+                              % (i, d["kind"], ", ".join(sorted(KNOWN_DECISION_KINDS))))
     return errors
 
 
@@ -555,6 +584,65 @@ def check_exclusivity(src, dst, cases):
             "ok": all(c["ok"] for c in out)}
 
 
+def check_evidence(spec):
+    """Every semantic decision carries the rung of evidence it rests on.
+
+    A meaning read off a column name and a meaning derived from the code that writes the
+    column print identically in a mapping. The skill's intake step ranks the evidence
+    (1 code read, 2 running system observed, 3 schema only) and rules that at rung 3 a
+    meaning is not declared but BLOCKED, naming the code or the person that unblocks it.
+    This is the enforceable slice of that rule: not whether the rung is true - the tool
+    cannot know that - but that each decision HAS one, that a derived one names its source,
+    that a rung-3 one is blocked rather than declared, and that a precedence the transform
+    actually applied (`exclusivity`) rests on rung 1 or 2.
+    """
+    ev = spec.get("evidence")
+    if ev is None:
+        # only reached when exclusivity forced the check: a precedence was APPLIED to the
+        # data, and nothing on the record says what that ruling rests on
+        return {"check": "evidence-rung", "ok": False,
+                "finding": "exclusivity declares a precedence the transform applied, but no "
+                           "evidence section records the rung it rests on - a precedence with "
+                           "no recorded evidence is a guess indistinguishable from a derivation",
+                "fix": "declare evidence.decisions with kind 'precedence', rung 1 or 2, and "
+                       "the code or observation it came from"}
+    cases = []
+    derived = observed = blocked = 0
+    for d in ev.get("decisions") or []:
+        rung = d["rung"]
+        is_blocked = bool(d.get("blocked"))
+        problems = []
+        if rung == 3 and not is_blocked:
+            problems.append("declared at rung 3 (schema only) - a name is not evidence; "
+                            "mark it blocked and name what unblocks it, or raise the rung by "
+                            "reading the code")
+        if is_blocked and not d.get("unblocked_by"):
+            problems.append("blocked with nobody named to unblock it - a parked guess")
+        if rung in (1, 2) and not is_blocked and not d.get("source"):
+            problems.append("rung %d with no source named - say which code or observation "
+                            "it came from" % rung)
+        if rung == 1 and not is_blocked and not problems:
+            derived += 1
+        elif rung == 2 and not is_blocked and not problems:
+            observed += 1
+        elif is_blocked and not problems:
+            blocked += 1
+        cases.append({"name": d["decision"], "kind": d.get("kind"), "rung": rung,
+                      "blocked": is_blocked, "problems": problems, "ok": not problems})
+    if spec.get("exclusivity") is not None:
+        covered = [c for c in cases if c["kind"] == "precedence" and c["ok"]
+                   and not c["blocked"] and c["rung"] in (1, 2)]
+        if not covered:
+            cases.append({"name": "exclusivity precedence", "kind": "precedence",
+                          "problems": ["a precedence was applied to the data but no decision "
+                                       "of kind 'precedence' at rung 1 or 2 records what it "
+                                       "rests on"], "ok": False})
+    return {"check": "evidence-rung", "source_rung": ev["source_rung"],
+            "destination_rung": ev["destination_rung"], "decisions": len(cases),
+            "derived": derived, "observed": observed, "blocked": blocked,
+            "cases": cases, "ok": all(c["ok"] for c in cases)}
+
+
 def check_provenance(entries):
     """An artifact older than the data it maps is stale by construction - it cannot know
     about anything created since. Staleness is invisible in the output. An entry missing
@@ -668,6 +756,10 @@ def run(spec, base="."):
         results.append(check_exclusivity(src, dst, spec["exclusivity"]))
     if spec.get("provenance") is not None:
         results.append(check_provenance(spec["provenance"]))
+    if spec.get("evidence") is not None or spec.get("exclusivity") is not None:
+        # exclusivity means a precedence was APPLIED, which forces the question of what
+        # it rests on even when no evidence section was declared
+        results.append(check_evidence(spec))
     return results
 
 
@@ -694,6 +786,9 @@ OPTIONAL_CHECKS = [
      "row totals were never summed - a partially applied load would not have been noticed"),
     ("provenance",      "provenance",
      "a hand-supplied mapping older than the data it maps was never checked for staleness"),
+    ("evidence",        "evidence-rung",
+     "no evidence rung recorded for any semantic decision - a meaning read off a column "
+     "name prints exactly like one derived from the code"),
 ]
 
 
@@ -716,7 +811,10 @@ def not_run(spec):
     PRESENCE, not truthiness - an empty `reconcile: {}` is a real declaration meaning "every
     mapped column", and reading it as absent would announce a check that actually ran.
     """
-    return [(check, why) for section, check, why in OPTIONAL_CHECKS if section not in spec]
+    return [(check, why) for section, check, why in OPTIONAL_CHECKS
+            if section not in spec
+            # exclusivity forces evidence-rung to RUN (and fail) rather than sit out
+            and not (section == "evidence" and "exclusivity" in spec)]
 
 
 def main():
@@ -748,12 +846,14 @@ def main():
         EVIDENCE = ("rows_compared", "columns_compared", "compared", "match_rate",
                     "min_match_rate", "rows_checked", "source_rows_selected",
                     "missing_in_destination", "allow_missing", "allow_unmatched",
-                    "unmatched_in_source", "columns_checked", "source_rows")
+                    "unmatched_in_source", "columns_checked", "source_rows",
+                    "source_rung", "destination_rung", "decisions", "derived", "observed",
+                    "blocked")
         for r in results:
             print(("FAIL  " if not r.get("ok", True) else "ok    ") + r["check"])
             if r.get("ok", True):
                 shown = ["%s=%s" % (k, json.dumps(r[k])) for k in EVIDENCE
-                         if k in r and r[k] not in (None, True)]
+                         if k in r and r[k] is not None and r[k] is not True]
                 if shown:
                     print("        " + "  ".join(shown)[:150])
             if not r.get("ok", True):

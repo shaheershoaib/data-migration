@@ -276,6 +276,9 @@ class MissingRowsAreCountedNotSkipped(unittest.TestCase):
     def test_a_declared_allowance_is_a_decision_not_a_skip(self):
         res, r = run_dict({
             "source": F("legacy_conflict.csv"), "destination": F("new_conflict_partial.csv"),
+            "evidence": {"source_rung": 1, "destination_rung": 1,
+                         "decisions": [{"decision": "reversal beats settle-flag", "kind": "precedence",
+                                        "rung": 1, "source": "legacy payments writer + aging report"}]},
             "exclusivity": [{"name": "reversal beats settle-flag", "allow_missing": 3,
                              "key": {"source": "id", "destination": "legacy_id"},
                              "destination_column": "status",
@@ -424,7 +427,7 @@ class CleanMigrationIsNotBlocked(unittest.TestCase):
                                "spec-references", "key-identity", "destination-provenance",
                              "value-reconciliation", "column-coverage",
                                "coverage-summation", "grain", "destination-contract",
-                               "counterexamples", "provenance"})
+                               "counterexamples", "provenance", "evidence-rung"})
 
     def test_a_zero_hit_counterexample_is_not_flagged(self):
         res, _ = run("spec_ok.json")
@@ -574,6 +577,106 @@ class DocumentStoresWork(unittest.TestCase):
         dst = [{"legacy_id": "u1", "name": "A", "address": {"city": "Lisbon"}, "orders": [{"n": 1}]}]
         _, r = self._run(docs, dst, self.SPEC)
         self.assertEqual(r.returncode, 0, "a correct document migration must not be blocked")
+
+class EvidenceRungIsRecorded(unittest.TestCase):
+    """A semantic decision has to carry the evidence it rests on.
+
+    The skill's intake step ranks evidence: 1 = the code was read, 2 = the running system
+    was observed, 3 = schema only. At rung 3 a meaning cannot be derived, so declaring one
+    is a guess by column name - and it prints exactly like a derivation unless the rung is
+    on the record. This is the enforceable slice: not whether the rung is TRUE, but that a
+    decision without one, or a rung-3 decision that was declared instead of blocked, blocks.
+    """
+
+    CONFLICT = {"source": F("legacy_conflict.csv"), "destination": F("new_conflict_resolved.csv"),
+                "exclusivity": [{"name": "reversal beats settle-flag",
+                                 "key": {"source": "id", "destination": "legacy_id"},
+                                 "destination_column": "status",
+                                 "states": [{"name": "reversed", "when": {"payment_state": "REVERSED"},
+                                             "destination_value": "REVERSED"},
+                                            {"name": "settled", "when": {"is_settled": "1"},
+                                             "destination_value": "SETTLED"}]}]}
+
+    def _clean(self, evidence):
+        spec = {"source": F("legacy_ok.csv"), "destination": F("new_ok.csv"), "evidence": evidence}
+        return run_dict(spec)
+
+    def test_precedence_applied_without_a_recorded_rung_fails(self):
+        # the transform let one flag win; nothing says what that ruling rests on
+        out, r = run_dict(dict(self.CONFLICT))
+        self.assertEqual(r.returncode, 1)
+        ev = by_name(out, "evidence-rung")
+        self.assertFalse(ev["ok"])
+        self.assertIn("precedence", json.dumps(ev).lower())
+        # it FAILED, so it must not also be announced as NOT RUN
+        self.assertNotIn("evidence-rung", [n["check"] for n in out["not_run"]])
+
+    def test_precedence_at_rung_one_with_its_source_passes(self):
+        res, code = run("spec_conflict_resolved.json")
+        self.assertTrue(by_name(res, "evidence-rung")["ok"])
+        self.assertEqual(res["failed"], 0)
+        self.assertEqual(code, 0)
+
+    def test_precedence_covered_only_by_a_blocked_decision_still_fails(self):
+        spec = dict(self.CONFLICT)
+        spec["evidence"] = {"source_rung": 3, "destination_rung": 1,
+                            "decisions": [{"decision": "which paid flag wins", "kind": "precedence",
+                                           "rung": 3, "blocked": True, "unblocked_by": "legacy app code"}]}
+        out, r = run_dict(spec)
+        self.assertEqual(r.returncode, 1)
+        self.assertFalse(by_name(out, "evidence-rung")["ok"])
+
+    def test_a_meaning_declared_at_schema_only_rung_fails(self):
+        out, r = self._clean({"source_rung": 3, "destination_rung": 1,
+                              "decisions": [{"decision": "state ACTIVE means the row is live",
+                                             "kind": "meaning", "rung": 3}]})
+        self.assertEqual(r.returncode, 1)
+        ev = by_name(out, "evidence-rung")
+        self.assertFalse(ev["ok"])
+        self.assertIn("blocked", json.dumps(ev).lower())
+
+    def test_a_blocked_rung_three_decision_that_names_its_unblocker_passes(self):
+        out, r = self._clean({"source_rung": 3, "destination_rung": 1,
+                              "decisions": [{"decision": "state ACTIVE means the row is live",
+                                             "kind": "meaning", "rung": 3, "blocked": True,
+                                             "unblocked_by": "the legacy list screen's filter"}]})
+        self.assertEqual(r.returncode, 0)
+        ev = by_name(out, "evidence-rung")
+        self.assertTrue(ev["ok"])
+        self.assertEqual(ev["blocked"], 1)
+
+    def test_a_blocked_decision_with_nobody_to_unblock_it_fails(self):
+        out, r = self._clean({"source_rung": 3, "destination_rung": 1,
+                              "decisions": [{"decision": "state ACTIVE means the row is live",
+                                             "kind": "meaning", "rung": 3, "blocked": True}]})
+        self.assertEqual(r.returncode, 1)
+        self.assertFalse(by_name(out, "evidence-rung")["ok"])
+
+    def test_a_derived_meaning_must_name_its_source(self):
+        out, r = self._clean({"source_rung": 1, "destination_rung": 1,
+                              "decisions": [{"decision": "state ACTIVE means the row is live",
+                                             "kind": "meaning", "rung": 1}]})
+        self.assertEqual(r.returncode, 1)
+        ev = by_name(out, "evidence-rung")
+        self.assertFalse(ev["ok"])
+        self.assertIn("source", json.dumps(ev).lower())
+
+    def test_an_invalid_rung_or_kind_is_a_spec_error(self):
+        _, r = self._clean({"source_rung": 4, "destination_rung": 1, "decisions": []})
+        self.assertEqual(r.returncode, 2)
+        _, r = self._clean({"source_rung": 1, "destination_rung": 1,
+                            "decisions": [{"decision": "x", "kind": "precedance", "rung": 1, "source": "s"}]})
+        self.assertEqual(r.returncode, 2)
+        _, r = self._clean({"source_rung": 1, "destination_rung": 1,
+                            "decisions": [{"decision": "x", "rung": 1, "source": "s", "confidence": "medium"}]})
+        self.assertEqual(r.returncode, 2, "a confidence label is not a rung")
+
+    def test_undeclared_evidence_is_announced_when_nothing_forces_it(self):
+        spec = {"source": F("legacy_ok.csv"), "destination": F("new_ok.csv")}
+        _, r = run_dict(spec, json_out=False)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("evidence-rung (NOT RUN", r.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
