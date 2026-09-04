@@ -288,7 +288,11 @@ that crosses midnight changes the BUSINESS date - a posting date, an invoice dat
 boundary - silently moving the row into a different reporting period. State the source zone
 and whether it observes DST, state the destination's storage convention, convert per row with
 a zone-aware library rather than an offset constant, and reconcile by value on a row from each
-side of a DST boundary and a row at 23:00 and 00:30 local.
+side of a DST boundary and a row at 23:00 and 00:30 local. Those spot rows prove the METHOD;
+they do not prove the data. A transform that caches one offset per calendar day converts every
+spot row correctly and is still an hour wrong for every row after the clock change on a
+transition day, so recompute every datetime column over the full population with the
+zone-aware conversion and require zero mismatches, the same as any other value in step 5.
 
 **Then enumerate what the destination actually ENFORCES.** This is the step everyone skips.
 Enums stored as free text, foreign keys declared without constraints, permissive numeric or
@@ -300,7 +304,9 @@ The contract includes what the APPLICATION enforces on its own writes, not just 
 a direct load bypasses ORM validation, model defaults, normalization and stamping
 (created_by, timestamps). Either replicate those in the transform, or record that migrated
 rows are deliberately distinguishable - a decision made on the record, not a gap found
-later.
+later. Then CHECK the marker on the landed data: count the rows that violate it. A recorded
+decision that a NULL stamp marks a migrated row, next to a thousand migrated rows stamped
+with a service account, is a decision the data did not follow.
 
 That application layer is code, and intake told you where it is: read the model
 definitions, validators and defaults for every table you load, not the schema alone. A
@@ -520,9 +526,29 @@ rounds, minor units against major, a timezone shift - not noise. "Explain each c
 naming the line of the transform that produces it and why that behaviour is correct. A class
 you can only describe is a class you have not explained.
 
+**A class the transform pre-explains is still a class to verify.** The comment or docstring
+beside the line that produces a mismatch is a claim by the person who wrote the defect, and the
+most dangerous classes arrive with a plausible reason attached: a status rewritten "because the
+destination's validator defines paid_at as money received", a fallback to NULL "because the
+model would reject the value", a window left unconverted "because an earlier import stored
+UTC". Check the reason against the code that READS the value (the destination's own filters,
+formulas and screens) and against the source's writers, and against the handover facts. If the
+reason cites a system, a rule or an import that neither codebase nor the handover contains, the
+class is OPEN, not explained.
+
+**Compare raw before you compare folded.** Every normalization you apply (trim, case, Unicode
+form, NULL against empty) is a difference you have decided not to see, so run the raw comparison
+first and report the raw-versus-folded gap as ROWS TO INSPECT, not as a rule to accept: a legal
+name re-cased, or stored in a different Unicode normalization form, renders identically on a
+screen and fails every exact-match lookup afterwards. Compare bytes, not glyphs.
+
 This is also how a denormalized or summary field is caught drifting from the records it
 summarises: derive the value from the authoritative rows, compare against the stored one
-across the whole population, and emit a backfill for the difference.
+across the whole population, and emit a backfill for the difference. Derive it with the
+destination's OWN formula, taken verbatim from the code that maintains the field, over EVERY
+row: a recompute that adds a filter the formula does not have (active customers only), or a
+floor the formula does not have (a balance cannot be negative), reproduces the defect it was
+meant to catch.
 
 ## Step 6 - scope the load, and protect what the destination OWNS
 
@@ -609,7 +635,10 @@ bug:
   separate settings, and any one left to a default turns an accented character into mojibake
   or a `?` on the way through. Round-trip one known non-ASCII row end to end over the real
   channel before the bulk run and compare it BYTE for byte - a terminal rendering both the
-  same is not evidence.
+  same is not evidence. That one row proves the channel; after the load, compare every
+  non-ASCII value byte for byte over the full population, because a transform can change
+  the Unicode normalization form (composed to decomposed) of every accented name while the
+  mojibake census stays clean and the screen shows the same letters.
 - **Name the columns in every load statement.** A positional LOAD/COPY silently shears when
   the file and the table disagree on column order: every value lands, every count
   reconciles, and each field holds its neighbour's data. Explicit column lists are one
