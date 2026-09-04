@@ -15,6 +15,10 @@ review-and-release process - the output still crosses review, CI and deploy like
 change. What lives here is the discipline that process cannot supply, because no test on
 the changed code can tell you the data it produced is wrong.
 
+If you can read only two sections, read **Sizing the loop** and the five receipt lines in
+step 7: the first says how deep each step goes for the job in front of you, the second is
+what a reviewer will check.
+
 ## The loop at a glance
 
 The `mechanical` column names the spec section in `migration_check.py` that makes the
@@ -38,6 +42,38 @@ check executable; everything else is judgment the steps below carry.
 | 7 close-out | can you show destination-side evidence, not a run log? | - |
 
 ---
+
+## Sizing the loop - depth scales with the stakes, the shape never does
+
+The loop has one shape. What a small job changes is how DEEP each step goes, and the
+temptation on a small job is to skip steps rather than shorten them. Skipping changes the
+shape: a two-hundred-row import with no key proof puts two hundred rows on the wrong
+entity exactly as silently as two million, and at two hundred rows the proof costs seconds.
+
+Size by four questions before the intake: how many rows; does a wrong row cost money,
+identity or trust; is the destination live; can the load be undone (the rows carry a
+marker that lets them be deleted, or a scoped restore is proven)?
+
+| step | small and low-stakes: hundreds of rows, reversible, nothing money-bearing | large or high-stakes |
+|---|---|---|
+| Intake | the same questions; the brief is ten lines | the full brief |
+| Reach | one round trip | every channel proven and timed |
+| 0 census | uniqueness, value domains and sentinels on the columns you map | full |
+| 1 contract | what the destination enforces versus assumes | + application layer, timezone per column |
+| 2 / 2b | only where a column's meaning is not literally its name; the rung is recorded either way | a counterexample per inferred field |
+| 3 keys | uniqueness and identity match rate, ALWAYS | + partition ambiguous rows, a second key path |
+| 3b fallbacks | count the unmappable and decide | full |
+| 4 coverage | rows and columns, ALWAYS | + grain |
+| 5 reconcile | by value over the full population - at hundreds of rows this is seconds, so there is no reason to sample | full; digests when the extract does not fit the channel (6b) |
+| 6 scope | the tables touched and the marker that lets the load be undone | + side effects, sequences, a rehearsed restore |
+| 6b scale | skipped, with the row count and duration that justify it | full |
+| 6c classes | as reported | as reported |
+| 7 receipt | the five lines in step 7 | full |
+
+Never shortened: the key proof, the coverage arithmetic, the by-value reconcile and the
+receipt. Those are what make it a migration rather than a copy, and at small volume they
+are the cheapest steps in the loop. A step you skip is written down with its reason; a
+step you shorten is written down with its depth.
 
 ## Intake - locate the CODE and the PATHS before you read a schema
 
@@ -583,6 +619,25 @@ bug:
   say so - or name a delta pass that re-runs this same loop over rows created since, and
   reconcile AFTER cut-over against the frozen source: that is the one moment both sides
   are supposed to be equal.
+- **When the extract does not fit the channel, move DIGESTS, not rows.** Build, on each
+  side in its own engine, one digest per row over the normalized mapped columns - the
+  step-5 normalization rule (trim, case, minor units, ISO dates, one fixed token for NULL)
+  written once per dialect and proven on a known row before the bulk - keyed by the join
+  key. Extract (key, digest) only: a few percent of the row width, and it reconciles with
+  `reconcile.columns: ["row_digest"]` unchanged. Pull full rows only for the keys whose
+  digests differ, to classify them. A digest built differently on the two sides reports
+  its own artifact as a total mismatch, which is why the first run compares one row by hand.
+- **Run the census where the data is.** Uniqueness, value domains, sentinels, the
+  counterexample queries and the contradiction counts are single-side queries: run them in
+  the source's own engine and move the RESULTS, which are kilobytes. Only the cross-system
+  comparison needs both sides in one place.
+- **If the source keeps writing during the migration - dual-write, replication, change
+  capture - the loop runs once per sync, and the reconcile needs a common WATERMARK.**
+  Both sides are compared as of the same point: a change marker on the source (an
+  updated-at column, a log position) or a frozen snapshot pair. A source with no change
+  marker has no delta, only a full re-compare; say so before promising a sync cadence. A
+  row changed on BOTH sides since the last sync is a conflict, and which side wins is step
+  2b's business rule, not last-writer.
 
 **Keep schema (DDL) and data (DML) as separate migrations.** They have different risk,
 different rollback, and different rehearsal needs; bundling them means a data defect forces
@@ -613,6 +668,18 @@ The receipt is the destination-side evidence, not the run log:
 - the evidence rung each side was on (code / running system / schema only), and which
   decisions were BLOCKED rather than guessed because of it
 - the migration brief, updated with what this run learned
+
+**The five lines a reviewer reads first.** Whatever else the receipt carries, these are
+checked first, and a missing line is not a shorter receipt - it is a claim without its check:
+
+```
+RECEIPT    <source> -> <destination>   run <date>   build <sha or version>
+reach      source via <path>; destination via <path>; write round trip <ok/failed, date>
+evidence   source rung <n>, destination rung <n>; blocked decisions: <n> (<which>)
+keys       <key>: source unique <yes/no, collisions>; identity <rate> vs <attribute>; deferred <n>
+coverage   in scope <n> = transformed <n> + skipped <n> + deferred <n>; columns mapped/dropped/defaulted <a/b/c>
+reconcile  <n> rows compared, <m> mismatches in <k> classes; each class: <transform line + why correct, or OPEN>
+```
 
 A migration that cannot show these has not been verified - it has been run. Take the
 honest downgrade rather than calling it done.
@@ -714,6 +781,11 @@ Published migration tooling, and most ORM tooling, covers **schema mechanics** -
 expand/contract, zero-downtime cutover, rollback, version ordering - and assumes the data
 itself is clean. That is a different problem from this one, and they compose: use them for
 HOW the schema changes, use this for WHETHER the data that landed is right.
+
+**What this loop cannot see.** It names the defect classes that have already reached
+production somewhere and looked like success. A class it does not name surfaces only as an
+unexplained mismatch class in step 5 or as a report in step 6c, found by a person reading
+the numbers. When that happens the fix is a line in this file, not a bigger sample.
 
 The checks here are not novel in data engineering - assertion frameworks (dbt tests, Great
 Expectations, Soda, data-diff) express exactly these destination-side constraints. Prefer
