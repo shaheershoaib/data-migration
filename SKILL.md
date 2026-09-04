@@ -35,6 +35,7 @@ check executable; everything else is judgment the steps below carry.
 | 3 keys | do the join keys mean the same thing in both systems? | `key` + `identity` |
 | 3b fallbacks | what happens to values that cannot be mapped? | - |
 | 4 coverage | is every row, column and grain accounted for? | `columns`, `grain`, `coverage` |
+| 4b merge | several sources, one destination: which rows are one entity, which source wins each field, and did every source row land, merge, skip or defer exactly once? | `merge` |
 | 5 reconcile | do the landed values match the source, over the FULL population? | `reconcile` |
 | 6 scope | can the load touch only what it owns - and what does the destination DO on write? | - |
 | 6b scale | does it complete at production size, and can it resume? | - |
@@ -507,6 +508,73 @@ artifact older than the extract it is being applied to is stale by construction 
 know about anything created since. Staleness is invisible in the output, so it has to be
 caught on the input.
 
+## Step 4b - many sources, one destination: the MERGE
+
+Consolidating several systems into one store is this loop run once per source, plus one
+step the single-source loop does not have: deciding which rows ACROSS sources are the same
+entity, and which source's value wins each field. Everything above still runs per pair -
+each system's code located at intake, its own mess censused, its own semantics read from its
+own writers, its keys proven against the destination, its coverage stated. Do not shortcut
+the per-pair work because the sources "hold the same kind of thing": the same column name in
+two systems means two different things more often than not (status vocabularies, what an
+empty email means, whether an id is per tenant), and a merge built on unproven pairs merges
+noise.
+
+Then the merge itself, which has the shape of the whole loop in miniature:
+
+**Census the OVERLAP before designing the match.** For every pair of sources, how many
+entities appear in both, measured on an independent attribute normalized the same way on both
+sides (step 3), raw and folded, both directions. The expected duplicate rate is a number you
+measure, not one you assume: a match rule tuned to a guess over-merges or under-merges at
+full row count with no error anywhere.
+
+**Declare the MATCH RULE, with its evidence rung.** Which attributes must agree for two rows
+to be one entity: a key genuinely shared between systems, or a natural key plus a second
+independent attribute; never a name alone. The rule is a semantic decision, so it carries a
+rung from intake, and at rung 3 it is blocked. Where the rule is probabilistic, the threshold
+is a business decision with a measured cost on each side (false merges versus false splits),
+not a library default.
+
+**Declare SURVIVORSHIP per field, with its rung.** When two sources hold different values for
+one field, one source wins that field: the system whose code actually maintains it (its
+writers), the one its business reconciles against (its readers), or the most recently written
+value where the timestamp is trustworthy. This is step 2b's precedence rule between SYSTEMS
+instead of between columns - declared highest first, one line per field, justified from the
+code. Losing values are not discarded: they go to a conflict list with the reason the winner
+won, so the ruling can be revisited when a field turns out wrong.
+
+**Keep a MERGE LEDGER; it is the coverage arithmetic across sources.** One row per source
+row: (source, source key, destination key, action), where action is `landed` (this row became
+the destination row), `merged` (folded into another row's destination row), `skipped` (with
+its reason) or `deferred` (ambiguous match, parked). Every source row appears exactly once,
+so that the sum over sources equals destination rows + merged + skipped + deferred, and a row
+lost between systems is a missing ledger line rather than a count that happens to balance.
+The ledger is also the provenance: which system produced each destination row and which rows
+it absorbed. Carry a per-source external reference on the destination row too (`crm:1042`,
+`billing:AC-9`), because a consolidated row with no provenance cannot be traced back when one
+field is wrong.
+
+**Hunt the two SILENT errors over the full population.** A FALSE MERGE (two real entities
+folded into one row) and a FALSE SPLIT (one entity left as two rows) both reconcile clean per
+pair: every landed value equals its own source. False merges: within every merged group,
+compare an independent attribute the match rule did NOT use (a second email, a tax id, a
+date of birth); groups whose members disagree are candidates, and each is looked at. False
+splits: among landed rows, attribute values shared by two or more destination rows are
+candidates. Report both counts in the receipt. A merge with zero candidates of either kind, on
+a population where the overlap census promised duplicates, is a match rule that did nothing.
+
+**State the SNAPSHOT SKEW.** N sources are N snapshots at N times. A relationship that crosses
+sources - an order in one system for a customer whose record in another was extracted two
+days later - can be inconsistent by construction. Record every snapshot time; freeze the
+sources together where you can; where you cannot, name the cross-source relationships that can
+be skewed and reconcile them after cut-over against the frozen set.
+
+**Then steps 5, 6 and 7 run on the merged destination.** Reconcile by value per pair, with
+the ledger and the survivorship rule saying which source value each destination field should
+equal; scope the load to what the merge owns; the receipt carries the sixth line from step 7.
+The `merge` section of `migration_check.py` makes the ledger arithmetic and the two candidate
+counts mechanical.
+
 ## Step 5 - reconcile BY VALUE over the FULL population
 
 Not a sample, and not row counts. Compare the destination's values against the source of
@@ -708,6 +776,7 @@ evidence   source rung <n>, destination rung <n>; blocked decisions: <n> (<which
 keys       <key>: source unique <yes/no, collisions>; identity <rate> vs <attribute>; deferred <n>
 coverage   in scope <n> = transformed <n> + skipped <n> + deferred <n>; columns mapped/dropped/defaulted <a/b/c>
 reconcile  <n> rows compared, <m> mismatches in <k> classes; each class: <transform line + why correct, or OPEN>
+merge      (consolidations) <n> sources: <sum> = landed <n> + merged <n> + skipped <n> + deferred <n>; conflicting merges <n>; split candidates <n>; survivorship declared for <k> fields
 ```
 
 A migration that cannot show these has not been verified - it has been run. Take the
@@ -746,7 +815,12 @@ intake rung it rests on: a rung-1 or rung-2 decision names its source, a rung-3 
 BLOCKED with its unblocker named rather than declared, and a precedence the transform
 applied through `exclusivity` must rest on rung 1 or 2 - with no `evidence` section at
 all, an `exclusivity` spec FAILS, because a precedence with no recorded evidence is a
-guess that prints like a derivation). A declared input with ZERO rows is a block too, unless `allow_empty`
+guess that prints like a derivation). When several sources feed one destination, the **merge ledger**
+check reads the ledger and the per-source extracts: every source row appears exactly once,
+every merged row has exactly one golden row, same-source merges were declared, and, given an
+independent attribute per source, false-merge candidates fail past a declared allowance while
+false-split candidates are reported and block only on a declared threshold. It is the one
+check not announced as NOT RUN when absent, because a single-source spec has nothing to merge. A declared input with ZERO rows is a block too, unless `allow_empty`
 says it is deliberate - an empty extract is the wrong-WHERE clause wearing a clean run.
 
 **It tells you what it did NOT check.** Every section is optional, so a spec declaring
@@ -774,6 +848,10 @@ switched off entirely. Each is a claim you are making, recorded in the output:
 | `contract[col].sentinels: false` | this column's sentinel-looking values are real | `"NA"` is Namibia, not "not applicable" |
 | `coverage.skipped` / `deferred` | this many rows were deliberately not transformed | any partial load, always with the reason written down |
 | `evidence.decisions[].blocked: true` | this meaning is NOT declared; the decision waits on the named `unblocked_by` | rung 3 (schema only) on the side that would have to answer it |
+| `merge.allow_same_source_merges: true` | two rows of ONE system were deliberately folded together | intra-source duplicates found in the census and decided there, not discovered by the cross-source match |
+| `merge.max_conflicting_merges: N` | up to N merged groups may disagree on the independent attribute | after each one has been looked at; the default is 0 |
+| `merge.max_split_candidates: N` | block if more than N landed rows share the independent attribute | when the overlap census says the residual duplicate rate should be near zero |
+| `merge.allow_destination_only: N` | up to N destination rows were not produced by the merge | rows the destination generates itself |
 | `allow_empty` | an empty input is expected | almost never - an empty extract passes every check by having nothing to fail |
 
 Declaring one is legitimate. Setting it to a number that makes the check unfalsifiable is the

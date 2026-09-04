@@ -678,5 +678,131 @@ class EvidenceRungIsRecorded(unittest.TestCase):
         self.assertIn("evidence-rung (NOT RUN", r.stdout)
 
 
+class MergeLedgerAcrossSources(unittest.TestCase):
+    """Several sources folded into one destination: the two silent errors are a FALSE MERGE
+    (two entities became one row) and a FALSE SPLIT (one entity stayed two rows). Both reconcile
+    clean per source-destination pair. The ledger is the coverage arithmetic across sources -
+    every source row landed, merged, skipped or deferred exactly once - and the independent
+    attribute is how the two silent errors become counts."""
+
+    def _lab(self, ledger_rows, dest_rows=None, crm_rows=None, hr_rows=None):
+        crm = write_csv("crm.csv", "id,email,name\n" + (crm_rows or
+              "1,ann@x.com,Ann\n2,bob@x.com,Bob\n3,cy@x.com,Cy\n4,dee@x.com,Dee\n"))
+        hr = write_csv("hr.csv", "emp_id,work_email,name\n" + (hr_rows or
+             "a,ANN@x.com ,Ann\nb,bob@x.com,Bob\nc,eve@x.com,Eve\n"))
+        dst = write_csv("dest.csv", "id,email,name\n" + (dest_rows or
+              "D1,ann@x.com,Ann\nD2,bob@x.com,Bob\nD3,cy@x.com,Cy\nD4,dee@x.com,Dee\nD5,eve@x.com,Eve\n"))
+        led = write_csv("ledger.csv", "source,source_key,destination_key,action\n" + ledger_rows)
+        return crm, hr, dst, led
+
+    CLEAN_LEDGER = ("crm,1,D1,landed\ncrm,2,D2,landed\ncrm,3,D3,landed\ncrm,4,D4,landed\n"
+                    "hr,a,D1,merged\nhr,b,D2,merged\nhr,c,D5,landed\n")
+
+    def _spec(self, crm, hr, dst, led, **extra):
+        m = {"ledger": led, "sources": {"crm": crm, "hr": hr},
+             "source_keys": {"crm": "id", "hr": "emp_id"}, "destination_key": "id",
+             "identity": {"sources": {"crm": "email", "hr": "work_email"}}}
+        m.update(extra)
+        return {"destination": dst, "merge": m}
+
+    def test_a_clean_consolidation_is_not_blocked(self):
+        out, r = run_dict(self._spec(*self._lab(self.CLEAN_LEDGER)))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        m = by_name(out, "merge-ledger")
+        self.assertTrue(m["ok"])
+        self.assertEqual((m["source_rows"], m["landed"], m["merged"], m["skipped"], m["deferred"]),
+                         (7, 5, 2, 0, 0))
+        self.assertEqual(m["conflicting_merges"], 0)
+        self.assertEqual(m["split_candidates"], 0)
+
+    def test_a_source_row_missing_from_the_ledger_fails(self):
+        # crm 4 never appears: the consolidation silently lost a row while every pair looks fine
+        ledger = self.CLEAN_LEDGER.replace("crm,4,D4,landed\n", "")
+        out, r = run_dict(self._spec(*self._lab(ledger)))
+        self.assertEqual(r.returncode, 1)
+        m = by_name(out, "merge-ledger")
+        self.assertFalse(m["ok"])
+        self.assertEqual(m["sources"]["crm"]["missing_from_ledger"], 1)
+
+    def test_a_merge_into_no_golden_row_fails(self):
+        # hr a merged into D9, which nothing landed
+        ledger = self.CLEAN_LEDGER.replace("hr,a,D1,merged", "hr,a,D9,merged")
+        out, r = run_dict(self._spec(*self._lab(ledger)))
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(by_name(out, "merge-ledger")["merged_into_no_golden_row"], 1)
+
+    def test_a_same_source_merge_is_a_declared_decision(self):
+        # crm 3 and crm 4 folded together: intra-source duplicates are a census finding, and
+        # merging them must be declared, not slipped into the cross-source match
+        ledger = self.CLEAN_LEDGER.replace("crm,4,D4,landed", "crm,4,D3,merged")
+        dest = "D1,ann@x.com,Ann\nD2,bob@x.com,Bob\nD3,cy@x.com,Cy\nD5,eve@x.com,Eve\n"
+        out, r = run_dict(self._spec(*self._lab(ledger, dest_rows=dest)))
+        self.assertEqual(r.returncode, 1)
+        m = by_name(out, "merge-ledger")
+        self.assertEqual(m["same_source_merges"], 1)
+        # declared, it is a decision; but crm 3 (cy@) and crm 4 (dee@) still disagree on the
+        # independent attribute, so the conflicting-merge count is what carries the finding
+        out, r = run_dict(self._spec(*self._lab(ledger, dest_rows=dest), allow_same_source_merges=True))
+        m = by_name(out, "merge-ledger")
+        self.assertEqual(m["same_source_merges"], 1)
+        self.assertEqual(m["conflicting_merges"], 1)
+        self.assertFalse(m["ok"])
+
+    def test_a_false_merge_is_caught_by_the_independent_attribute(self):
+        # hr c (eve@) folded into D4 (dee@): two people, one row
+        ledger = self.CLEAN_LEDGER.replace("hr,c,D5,landed", "hr,c,D4,merged")
+        dest = "D1,ann@x.com,Ann\nD2,bob@x.com,Bob\nD3,cy@x.com,Cy\nD4,dee@x.com,Dee\n"
+        out, r = run_dict(self._spec(*self._lab(ledger, dest_rows=dest)))
+        self.assertEqual(r.returncode, 1)
+        m = by_name(out, "merge-ledger")
+        self.assertEqual(m["conflicting_merges"], 1)
+        self.assertEqual(m["conflicting_merge_examples"][0]["destination_key"], "D4")
+        # the normalization is trim + case: hr a ('ANN@x.com ') against crm 1 is NOT a conflict
+        self.assertNotIn("D1", [e["destination_key"] for e in m["conflicting_merge_examples"]])
+
+    def test_a_false_split_is_reported_and_blocks_only_on_a_declared_threshold(self):
+        # hr b landed as its own row D6 although crm 2 (same email) landed as D2
+        ledger = self.CLEAN_LEDGER.replace("hr,b,D2,merged", "hr,b,D6,landed")
+        dest = "D1,ann@x.com,Ann\nD2,bob@x.com,Bob\nD3,cy@x.com,Cy\nD4,dee@x.com,Dee\nD5,eve@x.com,Eve\nD6,bob@x.com,Bob\n"
+        out, r = run_dict(self._spec(*self._lab(ledger, dest_rows=dest)))
+        m = by_name(out, "merge-ledger")
+        self.assertEqual(m["split_candidates"], 1)
+        self.assertEqual(r.returncode, 0, "a split candidate is a row to look at, reported, not a block on its own")
+        out, r = run_dict(self._spec(*self._lab(ledger, dest_rows=dest), max_split_candidates=0))
+        self.assertEqual(r.returncode, 1)
+
+    def test_destination_rows_the_merge_did_not_produce_are_counted(self):
+        dest = "D1,ann@x.com,Ann\nD2,bob@x.com,Bob\nD3,cy@x.com,Cy\nD4,dee@x.com,Dee\nD5,eve@x.com,Eve\nD7,new@x.com,New\n"
+        out, r = run_dict(self._spec(*self._lab(self.CLEAN_LEDGER, dest_rows=dest)))
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(by_name(out, "merge-ledger")["destination_only"], 1)
+        out, r = run_dict(self._spec(*self._lab(self.CLEAN_LEDGER, dest_rows=dest), allow_destination_only=1))
+        self.assertEqual(r.returncode, 0)
+
+    def test_an_unknown_action_or_key_is_not_a_silent_skip(self):
+        ledger = self.CLEAN_LEDGER.replace("hr,c,D5,landed", "hr,c,D5,loaded")
+        out, r = run_dict(self._spec(*self._lab(ledger)))
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(by_name(out, "merge-ledger")["unknown_actions"], 1)
+        _, r = run_dict(self._spec(*self._lab(self.CLEAN_LEDGER), survivorship="crm wins"))
+        self.assertEqual(r.returncode, 2, "an unknown merge key is a spec error")
+
+    def test_a_typo_in_the_identity_column_is_a_finding_not_a_zero(self):
+        # 'emial' selects nothing, so every group agrees on "" and both counts print 0 -
+        # the reassuring line that removes the check. It has to fail instead.
+        spec = self._spec(*self._lab(self.CLEAN_LEDGER))
+        spec["merge"]["identity"] = {"sources": {"crm": "emial", "hr": "work_email"}}
+        out, r = run_dict(spec)
+        self.assertEqual(r.returncode, 1)
+        m = by_name(out, "merge-ledger")
+        self.assertIn("crm.emial", " ".join(m["missing_columns"]))
+
+    def test_merge_is_not_announced_as_not_run_on_a_single_source_spec(self):
+        # a single source has nothing to merge; announcing it would be the false alarm that
+        # gets the whole NOT RUN table ignored
+        _, r = run_path(F("spec_ok.json"), json_out=False)
+        self.assertNotIn("merge-ledger", r.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
