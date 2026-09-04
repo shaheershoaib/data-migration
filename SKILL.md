@@ -1,6 +1,6 @@
 ---
 name: data-migration
-description: Use when moving or reshaping DATA rather than code - a legacy-system migration, a backfill, a bulk import, an ETL, a re-keying, or a one-off correction script over existing rows. Triggers on "migrate the data", "backfill X", "import from the old system", "reconcile the migration", "why is this row wrong since the migration". NOT for schema-only DDL with no data movement (that is an ordinary schema change, handled by expand/contract), and NOT for code-wide mechanical sweeps like a codemod or rename (that is a mechanical code sweep). Applies to any store - relational, document, key-value, warehouse - and to moves between kinds. The defining property: the correctness of the output cannot be observed from the input, so the whole discipline is about proving it on the destination.
+description: Use when moving or reshaping DATA rather than code - a legacy-system migration, a backfill, a bulk import, an ETL, a re-keying, or a one-off correction script over existing rows. Triggers on "migrate the data", "backfill X", "import from the old system", "reconcile the migration", "why is this row wrong since the migration". NOT for schema-only DDL with no data movement (that is an ordinary schema change, handled by expand/contract), and NOT for code-wide mechanical sweeps like a codemod or rename (that is a mechanical code sweep). Applies to any store - relational, document, key-value, warehouse - and to moves between kinds. The defining property: the correctness of the output cannot be observed from the input, so the whole discipline is about proving it on the destination. Also when only a schema dump or an extract has been handed over and the application code for either side has not.
 ---
 
 # data-migration (the work-type loop for moving data)
@@ -22,6 +22,7 @@ check executable; everything else is judgment the steps below carry.
 
 | step | the question it answers | mechanical |
 |---|---|---|
+| Intake | where is the code that WRITES and READS each side, and how is each store reached? | - |
 | Reach | can you read, move and write end to end - and what does the path cost? | - |
 | 0 census | what mess does the source actually contain? | `key` (uniqueness), `contract` on an extract |
 | 1 contract | what does the destination require - and what does it actually ENFORCE? | `contract` |
@@ -38,7 +39,103 @@ check executable; everything else is judgment the steps below carry.
 
 ---
 
-## First - can you REACH both systems, and what does that path cost?
+## Intake - locate the CODE and the PATHS before you read a schema
+
+A schema is the SHAPE of the data. Its MEANING lives in the code that writes each store
+and the code that reads it back for people, and every semantic step below (1, 2, 2b, 3,
+6) is an instruction to read that behaviour. This step is where you get it. Skipping it
+does not make the mapping faster; it moves the reading onto whoever answers your
+questions, one fact at a time, and they answer slower and less completely than a text
+search would.
+
+The tell: a question to the team of the form "what does column X mean", "which field does
+the old screen read", "what fires when a row is inserted" is a request for someone else to
+read code you could read. Ask for the CODE, answer the question yourself, and take to the
+team only the part that is a business call.
+
+**Discover first, then ask ONCE.** Before asking anyone, look: is either application
+checked out in or near the working tree; what do the project's own instruction files and
+docs say; what do the environment files and deploy configuration point at; is a database
+tool already connected. Ask only about what is still missing, and ask it as one batch at
+the start rather than as each later step trips over the gap.
+
+**The questions, by ROLE, never by technology.** The answers will name the technology;
+the questions must not assume one.
+
+For the SOURCE (the system being migrated from):
+- Where is the code that WRITES its store: the application, and every other writer
+  (scheduled jobs, stored procedures, imports, one-off scripts)?
+- Where is the code that READS it for people: screens, reports, exports? These define
+  what the business treats as true, and they decide step 2's authoritative field.
+- How is the store reached (direct, bastion, VM, container, vendor export only), from
+  where, and what limits does that path have?
+- Where do the credentials LIVE - a pointer, such as the application's configuration on
+  its host - never the values themselves.
+- Is it frozen for the migration or still taking writes? Is your access read-only?
+- Who owns the data and can rule on a precedence question?
+
+For the DESTINATION:
+- Where is the code that WRITES its store: models, validation, defaults, hooks? Where is
+  the code that will READ the migrated rows: the screens and filters that render them?
+- How is it reached, and is that same path usable for writes at volume?
+- Where do the credentials live?
+- Is it LIVE, taking application writes, during the migration?
+- Is there a rehearsal environment at production size?
+
+"Unknown" and "unavailable" are valid answers. Each becomes a line in the receipt rather
+than a gap discovered later.
+
+**The evidence LADDER, and what each rung lets you declare.** Record which rung each side
+is on:
+
+1. **Code readable** (writers and readers). Semantics and precedence are DERIVED, stated,
+   and then tested with the counterexample queries of step 2.
+2. **Running system observable** (screens, reports, exports, vendor documentation) but no
+   code. Semantics are OBSERVED per field; each is a hypothesis carrying the observation
+   that produced it.
+3. **Schema and census only.** Semantics cannot be derived, so every meaning is a guess by
+   name, and this skill's rule is that a name is not evidence. At this rung do NOT declare
+   field meaning or precedence, however hedged: block that decision, name the code or the
+   person that unblocks it, and carry on with what the rung does support (types, key
+   uniqueness, coverage, reach). A mapping declared here at "medium confidence" is the
+   face-value mapping this skill exists to prevent, wearing a confidence label.
+
+Rung 1 is the normal case, not a luxury: the legacy application usually exists somewhere
+even when nobody thought to hand it over. Ask before settling for rung 3.
+
+**Write the answers into a MIGRATION BRIEF the project owns.** A migration outlives a
+session; re-asking drifts and re-deriving costs. Keep the brief where the project keeps
+its other durable facts (its agent instruction file, a docs directory), reference it from
+there, and READ IT FIRST on every later run so you ask only for what it lacks. The shape:
+
+```markdown
+# Migration brief: <source> -> <destination>   (as of <date>)
+
+## Source
+- store: <kind, host or service, database>; frozen: <yes/no/since>; access: <read-only/rw>
+- reached via: <path, from where, limits observed>
+- credentials live at: <pointer>
+- code that writes it: <path or repo>; other writers: <jobs, procedures, scripts, or "none found">
+- code that reads it for people: <screens, reports, exports>
+- evidence rung: <1 code / 2 running system / 3 schema only>
+- data owner: <who rules on precedence>
+
+## Destination
+- store: <...>; live during migration: <yes/no>
+- reached via: <...>; write path proven: <date, batch size, time>
+- credentials live at: <pointer>
+- code that writes it: <models, validation, hooks>; code that reads the migrated rows: <...>
+- fires on write: <hooks, triggers, notifications, recomputes; or "none found">
+- rehearsal environment: <where, size relative to production>
+- evidence rung: <...>
+
+## Open
+- <question> -> <who> -> <blocks which decision>
+```
+
+---
+
+## Reach - can you reach both systems, and what does that path cost?
 
 Every step below assumes you can query the source, query the destination, and write to
 it. When the two live on different networks that assumption is the largest unbudgeted
@@ -62,6 +159,10 @@ Establish the path FIRST, and time it:
 - **An extract that crosses a boundary is a point-in-time SNAPSHOT.** Record when it was
   taken. Everything created in the source afterwards is invisible to it, which is the same
   staleness trap as a hand-supplied mapping artifact, arriving by a different route.
+- **The application's own configuration is the map to its store.** Host, port, database
+  name, the charset the client declares, and where the credentials come from all sit in the
+  code intake located; read them there before asking anyone, and carry the declared charset
+  into step 6b.
 
 If the path is slow or fragile, that is a fact about the migration, not an obstacle to
 push past quietly. Budget it.
@@ -147,7 +248,7 @@ zone, or an application assuming UTC, then REINTERPRETS those values instead of 
 them, and every timestamp moves by the offset - uniformly, which reconciles as a formatting
 class and is a real shift. DST makes it worse than a constant: the offset depends on each
 row's own date, so one correction factor is wrong for half the year. And a date-only value
-that crosses midnight changes the BUSINESS date - a check date, an invoice date, a period
+that crosses midnight changes the BUSINESS date - a posting date, an invoice date, a period
 boundary - silently moving the row into a different reporting period. State the source zone
 and whether it observes DST, state the destination's storage convention, convert per row with
 a zone-aware library rather than an offset constant, and reconcile by value on a row from each
@@ -165,12 +266,40 @@ a direct load bypasses ORM validation, model defaults, normalization and stampin
 rows are deliberately distinguishable - a decision made on the record, not a gap found
 later.
 
+That application layer is code, and intake told you where it is: read the model
+definitions, validators and defaults for every table you load, not the schema alone. A
+schema that says a status is ten free characters and a model that says it is one of five
+choices are two different contracts, and the load has to satisfy the one the application
+will read by.
+
 ## Step 2 - derive SEMANTICS from behaviour, not names
 
 A field's meaning comes from what the producing system DOES with it, never from what it is
 called. A boolean named for success may be set on submission and never cleared on failure.
 A timestamp may never be populated. Where two columns disagree, find which one the legacy
 system itself treats as authoritative - usually the one its own UI and reports read.
+
+**Where behaviour lives, and how to read it - the same four searches in any stack.** For
+each column you will map, find in the code intake located:
+
+- its **WRITERS**: every assignment - the model save, the raw SQL write, the scheduled job,
+  the stored procedure. Each writer is a candidate meaning, and a column with two writers
+  that disagree is step 2b's contradiction found before a single row is queried.
+- its **READERS**: every filter, report, export and screen that consumes it. The reader the
+  business reconciles against is the authoritative one. A column no reader consumes is a
+  candidate for dropping in step 4, not for mapping.
+- its **CONSTANTS**: enum definitions, status vocabularies, magic values, and the format of
+  any composite or prefixed identifier - naming conventions live here and nowhere in the
+  schema.
+- its **VALIDATION**: what the application refuses to write, which is step 1's "what the
+  application enforces" seen from the source side.
+
+You are not learning the framework; you are following one column through it, and a text
+search is enough. The code tells you what SHOULD have written the column; the census tells
+you what DID. Jobs, one-off scripts and years of manual fixes leave rows no current writer
+produced, so the writer supplies the hypothesis and the counterexample query below tests
+it. Where there is no code to read (rung 2 or 3 at intake), say so at the decision and do
+not fill the gap with the name.
 
 For any field whose meaning you inferred rather than observed, that inference is a
 HYPOTHESIS - and a hypothesis is testable, so **write the COUNTEREXAMPLE QUERY**: find the
@@ -378,6 +507,12 @@ effects is an incident, not a migration - two million rows can be two million em
 Enumerate the write-path side effects, disable or route around them deliberately, and
 re-enable afterwards, with both halves on the record.
 
+Those side effects are in the destination's CODE, at two layers: the application's write
+path (model hooks, signal receivers, queue publishers, denormalized recomputes) and the
+store's own (triggers, foreign-key actions). A direct load bypasses the first layer and
+still fires the second, so read both for every table you load - intake told you where -
+and list what fires before choosing the load path.
+
 **Reset the destination's id sequences after loading explicit keys.** Auto-increment and
 sequence counters do not follow explicit inserts everywhere; the first application insert
 after cut-over collides with a migrated id. No check on the migrated data can see this
@@ -475,6 +610,9 @@ The receipt is the destination-side evidence, not the run log:
   that took a fallback rather than a mapped value
 - the full-population value reconciliation (mismatch count)
 - spot checks BY VALUE on representative LEGACY and edge rows, not only freshly-created ones
+- the evidence rung each side was on (code / running system / schema only), and which
+  decisions were BLOCKED rather than guessed because of it
+- the migration brief, updated with what this run learned
 
 A migration that cannot show these has not been verified - it has been run. Take the
 honest downgrade rather than calling it done.
