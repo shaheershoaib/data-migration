@@ -1,4 +1,8 @@
 {"source": "legacy_conflict.csv", "destination": "new_conflict.csv",
+ "evidence": {"source_rung": 1, "destination_rung": 1,
+   "decisions": [{"decision": "a reversal beats a settle-flag: payment_state is what the legacy report reads; is_settled is written at submission and never cleared",
+                  "kind": "precedence", "rung": 1,
+                  "source": "legacy app: payments writer + the aging report finance reconciles against"}]},
  "exclusivity": [{
    "name": "a reversal beats a settle-flag - a bounced payment is not money received",
    "key": {"source": "id", "destination": "legacy_id"},

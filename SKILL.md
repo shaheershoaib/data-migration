@@ -22,7 +22,7 @@ check executable; everything else is judgment the steps below carry.
 
 | step | the question it answers | mechanical |
 |---|---|---|
-| Intake | where is the code that WRITES and READS each side, and how is each store reached? | - |
+| Intake | where is the code that WRITES and READS each side, and how is each store reached? | `evidence` (the rung each decision rests on) |
 | Reach | can you read, move and write end to end - and what does the path cost? | - |
 | 0 census | what mess does the source actually contain? | `key` (uniqueness), `contract` on an extract |
 | 1 contract | what does the destination require - and what does it actually ENFORCE? | `contract` |
@@ -643,9 +643,14 @@ column mapped / dropped / defaulted), **coverage summation** (transformed + skip
 deferred must equal the input), **grain** (children-per-parent in both directions,
 catching collapse AND fan-out), the **destination contract** (int/number/ISO-date/enum,
 required, min/max, all-NULL), your **counterexample queries** (an inferred meaning is a
-hypothesis), and **provenance** (an artifact older than the data it maps is stale by
+hypothesis), **provenance** (an artifact older than the data it maps is stale by
 construction - and an entry missing a date, or carrying a non-ISO one, fails rather than
-silently passing). A declared input with ZERO rows is a block too, unless `allow_empty`
+silently passing), and the **evidence rung** (every declared semantic decision carries the
+intake rung it rests on: a rung-1 or rung-2 decision names its source, a rung-3 one is
+BLOCKED with its unblocker named rather than declared, and a precedence the transform
+applied through `exclusivity` must rest on rung 1 or 2 - with no `evidence` section at
+all, an `exclusivity` spec FAILS, because a precedence with no recorded evidence is a
+guess that prints like a derivation). A declared input with ZERO rows is a block too, unless `allow_empty`
 says it is deliberate - an empty extract is the wrong-WHERE clause wearing a clean run.
 
 **It tells you what it did NOT check.** Every section is optional, so a spec declaring
@@ -672,6 +677,7 @@ switched off entirely. Each is a claim you are making, recorded in the output:
 | `counterexamples[].allow_no_match` | the hypothesis genuinely does not arise in this data | after checking it is not a value mismatch (`"1"` against a column holding `"true"`) |
 | `contract[col].sentinels: false` | this column's sentinel-looking values are real | `"NA"` is Namibia, not "not applicable" |
 | `coverage.skipped` / `deferred` | this many rows were deliberately not transformed | any partial load, always with the reason written down |
+| `evidence.decisions[].blocked: true` | this meaning is NOT declared; the decision waits on the named `unblocked_by` | rung 3 (schema only) on the side that would have to answer it |
 | `allow_empty` | an empty input is expected | almost never - an empty extract passes every check by having nothing to fail |
 
 Declaring one is legitimate. Setting it to a number that makes the check unfalsifiable is the
