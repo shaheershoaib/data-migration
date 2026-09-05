@@ -15,7 +15,8 @@ CSV, JSONL or JSON in - the format is the transport, not the database - so it ru
 against an extract, in CI, or against a fixture.
 
 ```bash
-python3 migration_check.py --spec spec.json
+python3 migration_census.py --spec census.json   # step 0: the source's mess, as numbers
+python3 migration_check.py  --spec spec.json     # the checks that can block
 ```
 
 ## The problem

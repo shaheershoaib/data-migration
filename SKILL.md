@@ -130,6 +130,14 @@ For the DESTINATION:
 "Unknown" and "unavailable" are valid answers. Each becomes a line in the receipt rather
 than a gap discovered later.
 
+**The brief is OUTPUT, not notes.** Whatever you deliver - a plan, an analysis, a receipt -
+carries the brief as a section, every line either filled in or written as a question to a
+named person. A line you could not fill is a question you have not asked yet. And for any
+side left at rung 2 or 3, the request for that side's code and access is the FIRST question
+in the batch, verbatim, before any question about the data: a data question at rung 3 is
+asking someone to look up an answer the code would give you, and it comes back slower and
+less complete.
+
 **The evidence LADDER, and what each rung lets you declare.** Record which rung each side
 is on:
 
@@ -246,6 +254,19 @@ inconsistencies becomes a silent defect downstream. Before writing any mapping, 
   every row count and most contracts. Census the non-ASCII values in name-like columns
   before the extract locks them in.
 - **Duplicates and near-duplicates** on the natural identity.
+
+**Run `migration_census.py` FIRST, then read.** Every bullet above is a query someone has
+to write per dataset, and that is where a census goes wrong: the wrong two sets compared,
+case never folded, two sources never put side by side. The tool beside this file prints the
+numbers - presence split into absent / null / empty, spellings that fold together, id-like
+values that are not digits, values with more than two decimals, dates in the future, dangling
+links against a target's keys, key uniqueness raw and folded, a crosstab of every flag against
+every categorical column (a row asserting two contradictory things shows up there before you
+know what the columns mean), and overlaps between two sources' attributes with case folding
+and array membership. Declare the sources, their keys and links, and the attribute pairs you
+expect to overlap; read the output before writing a single mapping line; paste the notable
+figures into the brief. It does not replace the reading of the code - it tells you where to
+look.
 
 Write the census down. It is the evidence for every scoping decision that follows, and it
 is what makes a later "we did not know" false.
@@ -793,8 +814,10 @@ honest downgrade rather than calling it done.
 ## Running the mechanical checks
 
 Most of this loop is judgment. The mechanical minority is not - each of those checks is a
-query whose answer is a number, and they are executable. They live in `migration_check.py`,
-beside this file:
+query whose answer is a number, and they are executable. Two scripts live beside this file:
+`migration_census.py` for step 0 (the source's mess, as numbers: presence, spellings, id
+shapes, decimals, future dates, dangling links, flag-by-category crosstabs, cross-source
+overlaps; a census, so it never blocks) and `migration_check.py` for the checks that can:
 
 ```bash
 python3 migration_check.py --spec spec.json

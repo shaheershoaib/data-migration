@@ -17,4 +17,6 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: run the checker's own receipts
-        run: python tests/test_migration_check.py -v
+        run: |
+          python tests/test_migration_check.py -v
+          python tests/test_migration_census.py -v
