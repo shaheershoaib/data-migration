@@ -15,6 +15,14 @@ review-and-release process - the output still crosses review, CI and deploy like
 change. What lives here is the discipline that process cannot supply, because no test on
 the changed code can tell you the data it produced is wrong.
 
+**Two ways in, one loop.** Either you are about to BUILD the migration - then the steps run
+in order, the transform at step 4 is yours to write, and steps 5 to 7 prove what you built -
+or a migration has ALREADY RUN and you are asked whether it is right. Then the same loop
+runs with one substitution: the transform is someone else's claim (a script, a vendor tool, a
+colleague's account of what happened), steps 0 to 3 tell you what it should have done, and
+steps 5 to 7 are the verdict. Nothing in the discipline changes between the two; only who
+wrote step 4. Most of this file is the build path.
+
 If you can read only two sections, read **Sizing the loop** and the five receipt lines in
 step 7: the first says how deep each step goes for the job in front of you, the second is
 what a reviewer will check.
