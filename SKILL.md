@@ -15,6 +15,19 @@ review-and-release process - the output still crosses review, CI and deploy like
 change. What lives here is the discipline that process cannot supply, because no test on
 the changed code can tell you the data it produced is wrong.
 
+## Start here - three actions before you read the rest
+
+1. **Census the handover with the tool, before forming any opinion about it.** Write
+   `census.json` naming every source file, its key column, its links to other sources and the
+   attribute pairs that should agree across sources (the shape is at the top of
+   `migration_census.py`), then run `python3 migration_census.py --spec census.json`. Every
+   number it prints is a finding you would otherwise have had to think of, and the ones you
+   would not have thought of are the point. Paste the notable figures into the brief.
+2. **Write the brief** (template under Intake). Fill every line or turn it into a question to
+   a named person. For any side whose code you do not have, the request for that code is the
+   first question.
+3. **Then read the loop in order**, and end with the receipt lines in step 7.
+
 **Two ways in, one loop.** Either you are about to BUILD the migration - then the steps run
 in order, the transform at step 4 is yours to write, and steps 5 to 7 prove what you built -
 or a migration has ALREADY RUN and you are asked whether it is right. Then the same loop
