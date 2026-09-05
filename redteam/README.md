@@ -1,8 +1,12 @@
 # Red-team protocol
 
-The skill's claim is that a verifier following it finds defects that reconcile clean and are
-still wrong. The way to test that claim without the author grading their own work is three
-separated roles:
+The skill's original claim was that a verifier following it finds defects that reconcile clean
+and are still wrong. Round 4 measured the same verifier WITHOUT the skill: it finds the same
+defects. The claim the evidence supports is narrower - the skill changes how the verifier RULES on
+what it finds (verifying a transform's cover story instead of accepting it, blocking a judgment
+call instead of defaulting it, asking for both sides' code first) and what it leaves behind (rungs,
+a ledger, a receipt). The way to test either claim without the author grading their own work is
+three separated roles:
 
 1. **Builder** (deterministic): `gen_source.py` produces a realistic legacy source (SQLite
    standing in for MySQL) whose mess is CONSISTENT with the legacy code's semantics;
