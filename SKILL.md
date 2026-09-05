@@ -268,6 +268,14 @@ expect to overlap; read the output before writing a single mapping line; paste t
 figures into the brief. It does not replace the reading of the code - it tells you where to
 look.
 
+**Two sources describing the same entity get compared like source and destination.** A
+mirror and its system of record, two systems each holding the customers, an export and the
+API it was taken from: run `migration_check.py` between them during the census, one declared
+as `source` and the other as `destination`, with `key` and `reconcile` over the shared
+columns. Only-in-one, only-in-the-other and shared-key-with-differing-values come out as
+counts before any decision about which one wins, and the differing-values count is the size
+of the survivorship decision step 4b will have to make.
+
 Write the census down. It is the evidence for every scoping decision that follows, and it
 is what makes a later "we did not know" false.
 
