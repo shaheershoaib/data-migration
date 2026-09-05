@@ -94,7 +94,10 @@ def read(path):
         with open(path, encoding="utf-8-sig") as f:
             docs = json.load(f)
         if isinstance(docs, dict):
-            docs = [docs]
+            # an API-shaped export - {"records": [...]}, {"data": [...]}, {"users": [...]} - is its
+            # one list of documents, not one document; treating it as a single row hides everything
+            lists = [v for v in docs.values() if isinstance(v, list) and v and all(isinstance(x, dict) for x in v)]
+            docs = lists[0] if len(lists) == 1 else [docs]
         return [flatten(d) for d in docs]
     with open(path, newline="", encoding="utf-8-sig") as f:
         return list(csv.DictReader(f))
