@@ -11,8 +11,8 @@ query altogether. The tool prints the numbers; the reader decides what they mean
 Spec:
   {"sources": {"roster":  {"path": "roster.json", "records": "records", "key": "id",
                             "links": {"fields.Manager": "roster"}, "id_like": ["fields.NMLS"]},
-               "google":  {"path": "users.json", "key": "id"}},
-   "overlaps": [{"name": "roster email vs google", "a": "roster.fields.Email", "b": "google.emails[].address"}]}
+               "directory": {"path": "users.json", "key": "id"}},
+   "overlaps": [{"name": "roster email vs directory", "a": "roster.fields.Email", "b": "directory.emails[].address"}]}
 
 Per source: rows; key uniqueness raw and folded; per field presence split into absent / null /
 empty; value counts for low-cardinality fields; spellings that fold together (case, whitespace);

@@ -41,15 +41,15 @@ class CensusFindsTheMess(unittest.TestCase):
             {"id": "e3", "fields": {"Amount": 30.0, "Status": "Rejected", "Reimbursed": True}},
             {"id": "e4", "fields": {"Amount": 40.25, "Status": "Pending"}},
             {"id": "e5", "fields": {"Amount": 50.125, "Status": "Paid", "Reimbursed": True}}]})
-        cls.google = w("users.json", {"users": [
+        cls.directory = w("users.json", {"users": [
             {"id": "g1", "primaryEmail": "ann@x.com", "emails": [{"address": "ann@x.com", "primary": True}]},
             {"id": "g2", "primaryEmail": "robert@x.com", "emails": [{"address": "robert@x.com", "primary": True}, {"address": "BOB@x.com"}]},
             {"id": "g3", "primaryEmail": "shared@x.com", "emails": [{"address": "shared@x.com", "primary": True}]}]})
         cls.spec = {"sources": {
             "roster": {"path": cls.roster, "key": "id", "links": {"fields.Manager": "roster"}, "id_like": ["fields.NMLS"]},
             "expenses": {"path": cls.expenses, "key": "id"},
-            "google": {"path": cls.google, "key": "id"}},
-            "overlaps": [{"name": "roster email vs google addresses", "a": "roster.fields.Email", "b": "google.emails[].address"}]}
+            "directory": {"path": cls.directory, "key": "id"}},
+            "overlaps": [{"name": "roster email vs directory addresses", "a": "roster.fields.Email", "b": "directory.emails[].address"}]}
         cls.out, cls.r = run(cls.spec)
 
     def src(self, name):
@@ -58,7 +58,7 @@ class CensusFindsTheMess(unittest.TestCase):
     def test_unwraps_the_records_key_and_counts_rows(self):
         self.assertEqual(self.r.returncode, 0, self.r.stderr)
         self.assertEqual(self.src("roster")["rows"], 5)
-        self.assertEqual(self.src("google")["rows"], 3)
+        self.assertEqual(self.src("directory")["rows"], 3)
 
     def test_presence_separates_absent_null_and_empty(self):
         f = self.src("roster")["fields"]["fields.Manager"]
@@ -104,7 +104,7 @@ class CensusFindsTheMess(unittest.TestCase):
 
     def test_overlap_uses_folding_and_array_membership(self):
         ov = self.out["overlaps"][0]
-        # ann matches (fold), bob matches only via the alias inside emails[], cy has no google user
+        # ann matches (fold), bob matches only via the alias inside emails[], cy has no directory user
         self.assertEqual(ov["a_distinct"], 3)                      # ann, bob, cy (blank excluded, 'ann@x.com ' folds into ann)
         self.assertEqual(ov["a_in_b_folded"], 2)
         self.assertEqual(ov["a_in_b_raw"], 0)                      # exact strings: 'Ann@x.com' != 'ann@x.com', 'bob' != 'BOB' - the gap IS the finding

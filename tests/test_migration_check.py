@@ -806,7 +806,7 @@ class MergeLedgerAcrossSources(unittest.TestCase):
 
 class ApiShapedExportsAreRows(unittest.TestCase):
     def test_a_single_top_level_list_key_is_the_rows(self):
-        # an Airtable / REST export is {"records": [...]}; treating it as ONE row hides everything
+        # an API-shaped export is {"records": [...]}; treating it as ONE row hides everything
         p = write_csv("api.json", json.dumps({"records": [{"id": "r1", "fields": {"a": 1}}, {"id": "r2", "fields": {"a": 2}}]}))
         out, r = run_dict({"source": p, "key": {"source": "id", "destination": "id"}})
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
