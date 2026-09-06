@@ -17,12 +17,15 @@ the changed code can tell you the data it produced is wrong.
 
 ## Start here - three actions before you read the rest
 
-1. **Census the handover with the tool, before forming any opinion about it.** Write
-   `census.json` naming every source file, its key column, its links to other sources and the
-   attribute pairs that should agree across sources (the shape is at the top of
-   `migration_census.py`), then run `python3 migration_census.py --spec census.json`. Every
-   number it prints is a finding you would otherwise have had to think of, and the ones you
-   would not have thought of are the point. Paste the notable figures into the brief.
+1. **Census the handover with the tool, before forming any opinion about it.** If the folder
+   already holds a `findings.md`, your harness ran it: read that file first, end to end, and carry
+   its numbers into everything below. If not, run
+   `python3 migration_census.py --discover <folder> --out findings.md` - it needs no
+   declarations: it finds the files, merges paginated exports, infers keys, links, cross-source
+   overlaps and the pairs of sources describing the same entities, and writes the findings as
+   sentences with counts, plus the declarations it inferred so you can correct one and re-run
+   with `--spec`. Every number in it is a finding you would otherwise have had to think of, and
+   the ones you would not have thought of are the point. Paste the notable figures into the brief.
 2. **Write the brief** (template under Intake). Fill every line or turn it into a question to
    a named person. For any side whose code you do not have, the request for that code is the
    first question.
@@ -271,15 +274,18 @@ inconsistencies becomes a silent defect downstream. Before writing any mapping, 
 **Run `migration_census.py` FIRST, then read.** Every bullet above is a query someone has
 to write per dataset, and that is where a census goes wrong: the wrong two sets compared,
 case never folded, two sources never put side by side. The tool beside this file prints the
-numbers - presence split into absent / null / empty, spellings that fold together, id-like
-values that are not digits, values with more than two decimals, dates in the future, dangling
-links against a target's keys, key uniqueness raw and folded, a crosstab of every flag against
-every categorical column (a row asserting two contradictory things shows up there before you
-know what the columns mean), and overlaps between two sources' attributes with case folding
-and array membership. Declare the sources, their keys and links, and the attribute pairs you
-expect to overlap; read the output before writing a single mapping line; paste the notable
-figures into the brief. It does not replace the reading of the code - it tells you where to
-look.
+numbers - presence split into absent / null / empty, and absence crossed with every category
+(the terminated rows with no date); spellings that fold together; id-like values that are not
+digits; values with more than two decimals; dates in the future; dangling links against a
+target's keys; key uniqueness raw and folded; a crosstab of every flag against every
+categorical column (a row asserting two contradictory things shows up there before you know
+what the columns mean); overlaps between two sources' attributes with case folding and array
+membership; and, for two sources describing the same entities, only-in-one, only-in-the-other
+and the rows whose same-named values deviate from the majority vocabulary mapping. With
+`--discover <folder>` it infers all of that from the files alone and writes `findings.md`;
+with `--spec` you declare it. Read the output before writing a single mapping line; paste the
+notable figures into the brief. It does not replace the reading of the code - it tells you
+where to look.
 
 **Two sources describing the same entity get compared like source and destination.** A
 mirror and its system of record, two systems each holding the customers, an export and the

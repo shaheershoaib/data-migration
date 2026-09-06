@@ -7,6 +7,14 @@ forgets to fold case, never puts two sources side by side - and a weaker reader 
 query altogether. The tool prints the numbers; the reader decides what they mean.
 
     python3 migration_census.py --spec census.json [--json]
+    python3 migration_census.py --discover <handover folder> --out findings.md [--json]
+
+`--discover` needs NO declarations: it scans the folder for CSV / JSON / JSONL, merges paginated
+files into one source, infers each source's key, the links between sources, the attributes that
+overlap across sources (array paths such as `emails[].address` included) and the pairs of sources
+that describe the same entities, runs the census, and writes the findings as sentences with counts
+plus the declarations it inferred, so a person can correct them. It exists because the numbers have
+to be right before the reader starts, whoever the reader is.
 
 Spec:
   {"sources": {"roster":  {"path": "roster.json", "records": "records", "key": "id",
@@ -212,6 +220,20 @@ def census_source(name, s, docs, all_sources):
             bad = [v for v in ids if str(v) not in tkeys]
             total += len(ids); dangling += len(bad); rows_with += 1 if bad else 0
         out["links"][col] = {"target": target, "link_values": total, "dangling": dangling, "rows_with_dangling": rows_with}
+    # which rows lack a field is often the finding ("terminated rows with no date"): cross the
+    # ABSENCE of every partially-present field with every categorical field
+    cats_for_presence = [k for k, f in out["fields"].items() if 2 <= f["distinct"] <= CATEGORY_MAX and "values" in f
+                         and all(isinstance(r.get(k), str) for r in rows if k in r and r.get(k) is not None)]
+    out["presence_by_category"] = []
+    for fk, f in out["fields"].items():
+        if not (0 < f["absent"] < n):
+            continue
+        for ck in cats_for_presence:
+            if ck == fk:
+                continue
+            by = collections.Counter(str(r[ck]) for r in rows if fk not in r and ck in r and not blank(r.get(ck)))
+            if by:
+                out["presence_by_category"].append({"field": fk, "category": ck, "absent_by_value": dict(by.most_common())})
     flags = [k for k, f in out["fields"].items() if f.get("flag_like") and f["present"] > 0]
     cats = [k for k, f in out["fields"].items() if not f.get("flag_like") and 2 <= f["distinct"] <= CATEGORY_MAX and "values" in f
             and all(isinstance(r.get(k), str) for r in rows if k in r and r.get(k) is not None)]
@@ -238,11 +260,310 @@ def overlap(o, all_sources):
             "examples_a_not_in_b": sorted(a_f - b_f)[:5]}
 
 
+EXTS = (".csv", ".json", ".jsonl", ".ndjson")
+KEYISH = re.compile(r"(^|[._ ])(id|key|[a-z]*id|[a-z]*_id|[a-z]+Id)$", re.I)
+PAGE_SUFFIX = re.compile(r"[\s_\-]*(page|part|chunk|p)?[\s_\-]*\d+$", re.I)
+IDLIKE = re.compile(r"^[A-Za-z]{0,6}[-_]?\d{3,}$")
+
+
+def _scalars(doc, path):
+    return [v for v in resolve(doc, path) if not blank(v) and not isinstance(v, (dict, list, bool))]
+
+
+def _paths(doc, prefix="", depth=0):
+    """Scalar paths and list-of-dict subpaths of one document, to depth 3."""
+    out = []
+    if not isinstance(doc, dict) or depth > 3:
+        return out
+    for k, v in doc.items():
+        key = prefix + k
+        if isinstance(v, dict):
+            out += _paths(v, key + ".", depth + 1)
+        elif isinstance(v, list) and v and all(isinstance(x, dict) for x in v):
+            subs = {}
+            for el in v:
+                for sk, sv in el.items():
+                    if not isinstance(sv, (dict, list)):
+                        subs[sk] = True
+            out += [key + "[]." + sk for sk in subs]
+        else:
+            out.append(key)
+    return out
+
+
+def _identifierish(values):
+    """Email-like or id-like value domains are the ones worth matching across sources."""
+    strs = [str(v).strip() for v in values]
+    if len(strs) < 3:
+        return False
+    email = sum(1 for v in strs if "@" in v) / len(strs)
+    idl = sum(1 for v in strs if IDLIKE.match(v) or DIGITS.match(v)) / len(strs)
+    return email >= 0.6 or idl >= 0.6
+
+
+def discover_sources(folder):
+    """Every readable data file, paginated series merged into one source, named by stem."""
+    found = []
+    for root, dirs, files in os.walk(folder):
+        dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+        for f in sorted(files):
+            if f.startswith(".") or not f.lower().endswith(EXTS):
+                continue
+            path = os.path.join(root, f)
+            try:
+                docs = load_docs(path)
+            except Exception:
+                continue
+            if not docs or not all(isinstance(d, dict) for d in docs):
+                continue
+            stem = os.path.splitext(f)[0]
+            base = PAGE_SUFFIX.sub("", stem) or stem
+            found.append({"dir": root, "stem": stem, "base": base, "path": path, "docs": docs,
+                          "fields": frozenset(k for d in docs[:50] for k in d)})
+    groups = {}
+    for it in found:
+        groups.setdefault((it["dir"], it["base"], it["fields"]), []).append(it)
+    sources = {}
+    for (d, base, _), items in groups.items():
+        name = base if len(items) > 1 or base == items[0]["stem"] else items[0]["stem"]
+        cand, parent = name, d
+        while cand in sources:                                 # disambiguate by parent directory
+            parent, tail = os.path.split(parent)               # never with '.', which addresses paths
+            cand = (tail + "_" + cand) if tail else cand + "_"
+        docs = [doc for it in items for doc in it["docs"]]
+        sources[cand] = {"paths": [os.path.relpath(it["path"], folder) for it in items], "docs": docs,
+                         "rows": [flatten(doc) for doc in docs]}
+    return sources
+
+
+def infer_key(src):
+    rows, n = src["rows"], len(src["rows"])
+    cands = []
+    for k in {k for r in rows for k in r if not k.endswith("[]")}:
+        vals = [r.get(k) for r in rows]
+        if any(blank(v) or isinstance(v, (bool, float)) for v in vals):
+            continue
+        if len({str(v) for v in vals}) == n:
+            cands.append(k)
+    if not cands:
+        return None
+    keyish = [k for k in cands if KEYISH.search(k)]
+    pool = keyish or cands
+    return sorted(pool, key=lambda k: (k.count("."), len(k)))[0]
+
+
+def infer_links(sources, keys):
+    """A column whose values live in another source's key domain links to it."""
+    links = {}
+    keysets = {n: {str(r.get(k)) for r in s["rows"] if not blank(r.get(k))}
+               for n, s in sources.items() for k in [keys.get(n)] if k}
+    for n, s in sources.items():
+        links[n] = {}
+        paths = set()
+        for d in s["docs"][:200]:
+            paths.update(pth for pth in _paths(d) if "[]." not in pth)
+        for pth in sorted(paths):
+            if pth == keys.get(n):
+                continue
+            allv = [str(v) for d in s["docs"] for v in _scalars(d, pth)]
+            vals = set(allv)
+            if len(vals) < 2:
+                continue
+            # a column unique within its own source is an identity, not a child link; the
+            # same-entity comparison handles it (a key shared with another source)
+            if len(vals) >= 0.95 * len(allv) and len(allv) >= 3:
+                continue
+            best = None
+            for tn, tkeys in keysets.items():
+                if not tkeys:
+                    continue
+                hits = len(vals & tkeys)
+                share = hits / len(vals)
+                if hits >= 2 and share >= 0.6 and (best is None or share > best[1]):
+                    best = (tn, share)
+            if best:
+                links[n][pth] = best[0]
+    return links
+
+
+def infer_overlaps(sources, keys, links):
+    """Identifier-ish attributes whose value domains meet across sources."""
+    cands = []
+    for n, s in sources.items():
+        paths = set()
+        for d in s["docs"][:200]:
+            paths.update(_paths(d))
+        for pth in sorted(paths):
+            if pth in links.get(n, {}):
+                continue
+            vals = [v for d in s["docs"] for v in _scalars(d, pth)]
+            if _identifierish(vals):
+                cands.append((n, pth, {fold(v) for v in vals}))
+    out = []
+    for i, (an, ap, aset) in enumerate(cands):
+        for bn, bp, bset in cands[i + 1:]:
+            if an == bn:
+                continue
+            inter = len(aset & bset)
+            if inter >= max(2, 0.05 * min(len(aset), len(bset))):
+                out.append({"name": "%s.%s vs %s.%s" % (an, ap, bn, bp), "a": "%s.%s" % (an, ap),
+                            "b": "%s.%s" % (bn, bp), "_inter": inter})
+    out.sort(key=lambda o: -o["_inter"])
+    for o in out:
+        o.pop("_inter")
+    return out[:20]
+
+
+def same_entity_pairs(sources):
+    """Two sources whose unique columns share most of a value domain describe the same entities:
+    only-in-A, only-in-B and, for same-named columns, values that differ on shared keys."""
+    uniq = {}
+    for n, s in sources.items():
+        rows = s["rows"]
+        for k in {k for r in rows for k in r if not k.endswith("[]")}:
+            vals = [str(r.get(k)).strip() for r in rows if not blank(r.get(k)) and not isinstance(r.get(k), (bool, float))]
+            if len(vals) >= 3 and len(set(vals)) >= 0.95 * len(vals):
+                uniq[(n, k)] = set(vals)
+    out, seen = [], set()
+    items = sorted(uniq.items())
+    for i, ((an, ak), aset) in enumerate(items):
+        for (bn, bk), bset in items[i + 1:]:
+            if an == bn or (an, bn) in seen:
+                continue
+            shared = aset & bset
+            if len(shared) < 0.5 * min(len(aset), len(bset)) or len(shared) < 3:
+                continue
+            seen.add((an, bn)); seen.add((bn, an))
+            arow = {str(r.get(ak)).strip(): r for r in sources[an]["rows"] if not blank(r.get(ak))}
+            brow = {str(r.get(bk)).strip(): r for r in sources[bn]["rows"] if not blank(r.get(bk))}
+            def norm(c): return re.sub(r"[^a-z0-9]", "", c.split(".")[-1].lower())
+            acols = {norm(c): c for c in {k for r in sources[an]["rows"] for k in r} if not c.endswith("[]")}
+            bcols = {norm(c): c for c in {k for r in sources[bn]["rows"] for k in r} if not c.endswith("[]")}
+            differing = []
+            for nc in sorted(set(acols) & set(bcols)):
+                ca, cb = acols[nc], bcols[nc]
+                if ca == ak or cb == bk:
+                    continue
+                pairs = collections.Counter((fold(arow[kk].get(ca)), fold(brow[kk].get(cb))) for kk in shared)
+                diff = sum(n for (x, y), n in pairs.items() if x != y)
+                if diff:
+                    # two vocabularies for one field map mostly one-to-one; infer the majority
+                    # mapping per source value and count the rows that deviate from it - those
+                    # are the real disagreements, the rest is vocabulary
+                    by_a = collections.defaultdict(collections.Counter)
+                    for (x, y), n in pairs.items():
+                        by_a[x][y] += n
+                    deviate = sum(sum(c.values()) - max(c.values()) for c in by_a.values())
+                    differing.append({"a_column": ca, "b_column": cb, "differs_on": diff,
+                                      "deviate_from_majority_mapping": deviate})
+            differing.sort(key=lambda d: -d["differs_on"])
+            out.append({"a": an, "a_key": ak, "b": bn, "b_key": bk, "shared_keys": len(shared),
+                        "only_in_a": len(aset - bset), "only_in_b": len(bset - aset),
+                        "differing_columns": differing[:6]})
+    return out
+
+
+def findings_text(report):
+    """The census as sentences a reader can paste, grouped by source."""
+    lines = ["# Findings computed from the handover (no declarations)", "",
+             "Every number below came from the files as they are. A finding is not a defect until a person",
+             "has read it against what the code that writes and reads the column says; it is a place to look.", ""]
+    for name, r in report["sources"].items():
+        lines.append("## %s (%d rows)" % (name, r["rows"]))
+        k = r.get("key")
+        if k:
+            if k["blank"] or k["duplicates_folded"]:
+                lines.append("- key `%s`: %d blank, %d values repeat as typed, %d repeat after folding case and space%s. One entity or two? Decide before anything joins on it."
+                             % (k["column"], k["blank"], k["duplicates_raw"], k["duplicates_folded"], (" (e.g. %s)" % ", ".join(k["examples"])) if k["examples"] else ""))
+        else:
+            lines.append("- no column is unique across all rows: nothing here can serve as a key without a rule.")
+        for fname, f in r["fields"].items():
+            if f["absent"] and f["present"]:
+                lines.append("- `%s`: absent on %d rows, null on %d, empty on %d. Absent is not null; decide what each becomes in the destination." % (fname, f["absent"], f["null"], f["empty"]))
+            for g in f.get("variant_groups", [])[:8]:
+                lines.append("- `%s`: %d rows use minority spellings of %r (%s). Fold before mapping and check the destination's allowed values." % (fname, g["rows_in_minority_spellings"], g["folded"], ", ".join(repr(x) for x in g["spellings"])))
+            il = f.get("id_like")
+            if il and (il["non_digit"] or il["collisions_after_digit_normalize"]):
+                lines.append("- `%s`: %d values are not digits-only; %d values collide after digit-normalisation. Normalise before joining on it, and look at the collisions." % (fname, il["non_digit"], il["collisions_after_digit_normalize"]))
+            nm = f.get("numeric")
+            if nm and nm["more_than_2_decimals"]:
+                lines.append("- `%s`: %d values carry more than 2 decimals (min %s, max %s). Round with a declared rule before storing minor units; truncation loses money." % (fname, nm["more_than_2_decimals"], nm["min"], nm["max"]))
+            if nm and nm["negative"]:
+                lines.append("- `%s`: %d negative values. Does the destination accept the sign, and does its readers' arithmetic expect it?" % (fname, nm["negative"]))
+            dt = f.get("dates")
+            if dt and dt["in_future"]:
+                lines.append("- `%s`: %d dates are after today (max %s). Real forward dates, or a clock, zone or extract problem?" % (fname, dt["in_future"], dt["max"]))
+        for col, l in r["links"].items():
+            if l["dangling"]:
+                lines.append("- `%s`: %d links point at no %s row (%d rows affected). Orphans: decide their disposition before load; an enforced FK aborts on them, an unenforced one dangles." % (col, l["dangling"], l["target"], l["rows_with_dangling"]))
+        for x in r["crosstabs"]:
+            lines.append("- `%s` is true across `%s` as %s. If any of these combinations cannot both be true, the row asserts two states; decide which one wins, from the code that writes them." % (x["flag"], x["category"], json.dumps(x["true_by_value"])))
+        for x in r.get("presence_by_category", []):
+            lines.append("- `%s` is absent across `%s` as %s. If absence means something different per group (a date every terminated row should have), that is the finding." % (x["field"], x["category"], json.dumps(x["absent_by_value"])))
+        lines.append("")
+    if report["overlaps"]:
+        lines.append("## Attributes that meet across sources")
+        for o in report["overlaps"]:
+            lines.append("- %s: %d values shared after folding (%d as typed), %d only in the first, %d only in the second. The typed-versus-folded gap is rows whose match depends on case or whitespace." % (o["name"], o["a_in_b_folded"], o["a_in_b_raw"], o["a_not_in_b"], o["b_not_in_a"]))
+        lines.append("")
+    if report.get("same_entity"):
+        lines.append("## Sources that describe the same entities")
+        for p in report["same_entity"]:
+            diffs = "; ".join("`%s`/`%s` differs on %d (after inferring the majority vocabulary mapping, %d rows deviate)" % (d["a_column"], d["b_column"], d["differs_on"], d["deviate_from_majority_mapping"]) for d in p["differing_columns"]) or "no same-named column differs"
+            lines.append("- %s.%s and %s.%s: %d shared keys, %d only in %s, %d only in %s. On shared keys: %s. Which one is the system of record for each differing field is a decision, not a default." % (p["a"], p["a_key"], p["b"], p["b_key"], p["shared_keys"], p["only_in_a"], p["a"], p["only_in_b"], p["b"], diffs))
+        lines.append("")
+    lines.append("## Declarations inferred (correct these and re-run with --spec if any is wrong)")
+    lines.append("```json"); lines.append(json.dumps(report["declarations"], indent=1)); lines.append("```")
+    return "\n".join(lines) + "\n"
+
+
+def discover(folder):
+    sources = discover_sources(folder)
+    if not sources:
+        return None
+    keys = {n: infer_key(s) for n, s in sources.items()}
+    links = infer_links(sources, keys)
+    overlaps = infer_overlaps(sources, keys, links)
+    spec_sources = {n: {"paths": s["paths"], **({"key": keys[n]} if keys[n] else {}), **({"links": links[n]} if links[n] else {})}
+                    for n, s in sources.items()}
+    all_sources = {n: {"spec": spec_sources[n], "docs": s["docs"], "rows": s["rows"]} for n, s in sources.items()}
+    report = {"mode": "discover", "folder": folder, "declarations": {"sources": spec_sources, "overlaps": overlaps},
+              "sources": {}, "overlaps": [], "same_entity": []}
+    for n in sources:
+        report["sources"][n], _ = census_source(n, spec_sources[n], sources[n]["docs"], all_sources)
+    for o in overlaps:
+        report["overlaps"].append(overlap(o, all_sources))
+    report["same_entity"] = same_entity_pairs(sources)
+    return report
+
+
 def main():
     ap = argparse.ArgumentParser(description="census of a migration source's mess")
-    ap.add_argument("--spec", required=True)
+    ap.add_argument("--spec")
+    ap.add_argument("--discover", metavar="FOLDER", help="infer everything from a handover folder; no spec needed")
+    ap.add_argument("--out", metavar="FINDINGS_MD", help="with --discover: write the findings as markdown here")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args()
+    if a.discover:
+        if not os.path.isdir(a.discover):
+            print("SPEC ERROR: --discover needs a folder, got %r" % a.discover, file=sys.stderr); sys.exit(2)
+        report = discover(a.discover)
+        if report is None:
+            print("SPEC ERROR: no readable CSV / JSON / JSONL data files under %s" % a.discover, file=sys.stderr); sys.exit(2)
+        text = findings_text(report)
+        if a.out:
+            with open(a.out, "w", encoding="utf-8") as f:
+                f.write(text)
+        if a.json:
+            print(json.dumps(report, indent=2, default=str))
+        elif not a.out:
+            print(text)
+        else:
+            print("findings written to %s (%d sources, %d overlaps, %d same-entity pairs)"
+                  % (a.out, len(report["sources"]), len(report["overlaps"]), len(report["same_entity"])))
+        return
+    if not a.spec:
+        print("SPEC ERROR: give --spec census.json or --discover FOLDER", file=sys.stderr); sys.exit(2)
     with open(a.spec, encoding="utf-8") as f:
         spec = json.load(f)
     errors = validate(spec)
