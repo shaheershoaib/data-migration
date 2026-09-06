@@ -239,5 +239,38 @@ class DiscoverNeedsNoDeclarations(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
 
 
+class FindingsLeadWithTheBiggestNumbers(unittest.TestCase):
+    """A weak reader skims. The file has to put the largest findings first, in one line each,
+    and it has to state two facts round 5 found missing: an identifier that repeats inside one
+    source (two rows, one person) and a value whose magnitude is two orders off its column."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.folder = os.path.join(TMP, "lead_%d" % len(os.listdir(TMP))); os.makedirs(cls.folder)
+        rows = [{"id": "r%d" % i, "fields": {"Email": "p%d@x.com" % (i % 12), "Split": 0.7 if i < 13 else 70.0, "Status": "Active"}} for i in range(15)]
+        json.dump({"records": rows}, open(os.path.join(cls.folder, "people.json"), "w"))
+        cls.out, cls.r, cls.md = run_discover(cls.folder)
+        cls.text = open(cls.md, encoding="utf-8").read()
+
+    def test_repeated_identifier_values_inside_one_source_are_counted(self):
+        f = self.out["sources"]["people"]["fields"]["fields.Email"]
+        self.assertEqual(f["repeated_values"]["values_on_more_than_one_row"], 3)     # p0, p1, p2 appear twice
+        self.assertEqual(f["repeated_values"]["rows_involved"], 6)
+        self.assertRegex(self.text, r"3 values appear on more than one row")
+
+    def test_magnitude_outliers_are_counted(self):
+        f = self.out["sources"]["people"]["fields"]["fields.Split"]
+        self.assertEqual(f["numeric"]["magnitude_outliers"], 2)                       # 70.0 twice against 0.7
+        self.assertRegex(self.text, r"2 values sit two or more orders of magnitude")
+
+    def test_findings_open_with_a_ranked_summary(self):
+        head = self.text.split("## ", 2)[1]          # the first section after the title
+        self.assertTrue(head.startswith("Largest findings first"), head[:60])
+        lines = [l for l in head.splitlines() if l.startswith("|")]
+        self.assertGreaterEqual(len(lines), 3)
+        nums = [int(l.split("|")[1].strip().replace(",", "")) for l in lines[2:] if l.split("|")[1].strip().replace(",", "").isdigit()]
+        self.assertEqual(nums, sorted(nums, reverse=True))
+
+
 if __name__ == "__main__":
     unittest.main()

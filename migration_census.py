@@ -169,6 +169,12 @@ def field_census(rows, name, declared_id_like):
                 today = datetime.date.today()
                 out["dates"] = {"min": parsed[0].isoformat() if len(parsed) == 1 else min(parsed).isoformat(), "max": max(parsed).isoformat(),
                                 "in_future": sum(1 for d in parsed if d > today), "unparseable": bad}
+    if strings and _identifierish(strings):
+        rep = collections.Counter(fold(v) for v in strings)
+        multi = {k: c for k, c in rep.items() if c > 1}
+        if multi:
+            out["repeated_values"] = {"values_on_more_than_one_row": len(multi), "rows_involved": sum(multi.values()),
+                                      "examples": sorted(multi)[:5]}
     numbers = [v for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
     if not numbers:
         maybe = []
@@ -179,8 +185,14 @@ def field_census(rows, name, declared_id_like):
                 maybe = []; break
         numbers = maybe if len(maybe) == len(strings) and strings else []
     if numbers:
+        import math
+        mags = sorted(math.floor(math.log10(abs(x))) for x in numbers if x != 0)
+        median_mag = mags[len(mags) // 2] if mags else 0
         out["numeric"] = {"min": min(numbers), "max": max(numbers), "negative": sum(1 for x in numbers if x < 0),
-                          "more_than_2_decimals": sum(1 for x in numbers if isinstance(x, float) and abs(x * 100 - round(x * 100)) > 1e-6)}
+                          "more_than_2_decimals": sum(1 for x in numbers if isinstance(x, float) and abs(x * 100 - round(x * 100)) > 1e-6),
+                          # a value two orders of magnitude from its column's median is a unit error
+                          # (70 in a column of 0.70) far more often than a real value
+                          "magnitude_outliers": sum(1 for x in numbers if x != 0 and abs(math.floor(math.log10(abs(x))) - median_mag) >= 2)}
     flagvals = set(present) - {None}
     out["flag_like"] = bool(flagvals) and all((v in TRUTHY or v in FALSY or (isinstance(v, str) and v.strip().lower() in TRUTHY | FALSY)) for v in flagvals if not isinstance(v, (list, dict)))
     return out
@@ -464,10 +476,10 @@ def same_entity_pairs(sources):
 
 
 def findings_text(report):
-    """The census as sentences a reader can paste, grouped by source."""
-    lines = ["# Findings computed from the handover (no declarations)", "",
-             "Every number below came from the files as they are. A finding is not a defect until a person",
-             "has read it against what the code that writes and reads the column says; it is a place to look.", ""]
+    """The census as sentences a reader can paste: the largest findings first in one line each,
+    then everything grouped by source."""
+    ranked = []   # (rows affected, where, one-line what)
+    lines = []
     for name, r in report["sources"].items():
         lines.append("## %s (%d rows)" % (name, r["rows"]))
         k = r.get("key")
@@ -475,19 +487,33 @@ def findings_text(report):
             if k["blank"] or k["duplicates_folded"]:
                 lines.append("- key `%s`: %d blank, %d values repeat as typed, %d repeat after folding case and space%s. One entity or two? Decide before anything joins on it."
                              % (k["column"], k["blank"], k["duplicates_raw"], k["duplicates_folded"], (" (e.g. %s)" % ", ".join(k["examples"])) if k["examples"] else ""))
+                ranked.append((k["blank"] + k["duplicates_folded"], "%s.%s" % (name, k["column"]), "key blank on %d rows, %d values repeat after folding" % (k["blank"], k["duplicates_folded"])))
         else:
             lines.append("- no column is unique across all rows: nothing here can serve as a key without a rule.")
         for fname, f in r["fields"].items():
             if f["absent"] and f["present"]:
                 lines.append("- `%s`: absent on %d rows, null on %d, empty on %d. Absent is not null; decide what each becomes in the destination." % (fname, f["absent"], f["null"], f["empty"]))
-            for g in f.get("variant_groups", [])[:8]:
+            vg = f.get("variant_groups", [])
+            for g in vg[:8]:
                 lines.append("- `%s`: %d rows use minority spellings of %r (%s). Fold before mapping and check the destination's allowed values." % (fname, g["rows_in_minority_spellings"], g["folded"], ", ".join(repr(x) for x in g["spellings"])))
+            if vg:
+                ranked.append((sum(g["rows_in_minority_spellings"] for g in vg), "%s.%s" % (name, fname), "%d rows use minority spellings across %d folded values" % (sum(g["rows_in_minority_spellings"] for g in vg), len(vg))))
+            rv = f.get("repeated_values")
+            if rv:
+                lines.append("- `%s`: %d values appear on more than one row after folding (%d rows involved; e.g. %s). An identifier that repeats inside one source is two rows for one entity, or a legitimate repeat - decide which." % (fname, rv["values_on_more_than_one_row"], rv["rows_involved"], ", ".join(rv["examples"])))
+                ranked.append((rv["values_on_more_than_one_row"], "%s.%s" % (name, fname), "%d identifier values appear on more than one row" % rv["values_on_more_than_one_row"]))
             il = f.get("id_like")
             if il and (il["non_digit"] or il["collisions_after_digit_normalize"]):
                 lines.append("- `%s`: %d values are not digits-only; %d values collide after digit-normalisation. Normalise before joining on it, and look at the collisions." % (fname, il["non_digit"], il["collisions_after_digit_normalize"]))
+                if il["non_digit"]:
+                    ranked.append((il["non_digit"], "%s.%s" % (name, fname), "%d id values are not digits-only" % il["non_digit"]))
             nm = f.get("numeric")
             if nm and nm["more_than_2_decimals"]:
                 lines.append("- `%s`: %d values carry more than 2 decimals (min %s, max %s). Round with a declared rule before storing minor units; truncation loses money." % (fname, nm["more_than_2_decimals"], nm["min"], nm["max"]))
+                ranked.append((nm["more_than_2_decimals"], "%s.%s" % (name, fname), "%d values carry more than 2 decimals" % nm["more_than_2_decimals"]))
+            if nm and nm.get("magnitude_outliers"):
+                lines.append("- `%s`: %d values sit two or more orders of magnitude from the column's median (min %s, max %s). A unit error (70 in a column of 0.70) far more often than a real value; look before converting." % (fname, nm["magnitude_outliers"], nm["min"], nm["max"]))
+                ranked.append((nm["magnitude_outliers"], "%s.%s" % (name, fname), "%d values are two or more orders of magnitude off the column" % nm["magnitude_outliers"]))
             if nm and nm["negative"]:
                 lines.append("- `%s`: %d negative values. Does the destination accept the sign, and does its readers' arithmetic expect it?" % (fname, nm["negative"]))
             dt = f.get("dates")
@@ -496,8 +522,13 @@ def findings_text(report):
         for col, l in r["links"].items():
             if l["dangling"]:
                 lines.append("- `%s`: %d links point at no %s row (%d rows affected). Orphans: decide their disposition before load; an enforced FK aborts on them, an unenforced one dangles." % (col, l["dangling"], l["target"], l["rows_with_dangling"]))
+                ranked.append((l["dangling"], "%s.%s" % (name, col), "%d links point at no %s row" % (l["dangling"], l["target"])))
         for x in r["crosstabs"]:
             lines.append("- `%s` is true across `%s` as %s. If any of these combinations cannot both be true, the row asserts two states; decide which one wins, from the code that writes them." % (x["flag"], x["category"], json.dumps(x["true_by_value"])))
+            vals = x["true_by_value"]
+            if len(vals) > 1:
+                minority = sum(vals.values()) - max(vals.values())
+                ranked.append((minority, "%s.%s x %s" % (name, x["flag"], x["category"]), "flag true on %d rows outside its dominant %s value: %s" % (minority, x["category"].split(".")[-1], json.dumps(vals))))
         for x in r.get("presence_by_category", []):
             lines.append("- `%s` is absent across `%s` as %s. If absence means something different per group (a date every terminated row should have), that is the finding." % (x["field"], x["category"], json.dumps(x["absent_by_value"])))
         lines.append("")
@@ -506,6 +537,13 @@ def findings_text(report):
         for o in report["overlaps"]:
             lines.append("- %s: %d values shared after folding (%d as typed), %d only in the first, %d only in the second. The typed-versus-folded gap is rows whose match depends on case or whitespace." % (o["name"], o["a_in_b_folded"], o["a_in_b_raw"], o["a_not_in_b"], o["b_not_in_a"]))
         lines.append("")
+    for o in report["overlaps"]:
+        if o["a_not_in_b"] or o["b_not_in_a"]:
+            ranked.append((o["a_not_in_b"] + o["b_not_in_a"], o["name"], "%d only in the first, %d only in the second (%d shared after folding, %d as typed)" % (o["a_not_in_b"], o["b_not_in_a"], o["a_in_b_folded"], o["a_in_b_raw"])))
+    for p in report.get("same_entity", []):
+        ranked.append((p["only_in_a"] + p["only_in_b"], "%s.%s vs %s.%s" % (p["a"], p["a_key"], p["b"], p["b_key"]), "%d only in %s, %d only in %s, %d shared" % (p["only_in_a"], p["a"], p["only_in_b"], p["b"], p["shared_keys"])))
+        for d in p["differing_columns"]:
+            ranked.append((d["deviate_from_majority_mapping"], "%s.%s vs %s.%s" % (p["a"], d["a_column"], p["b"], d["b_column"]), "%d rows deviate from the majority vocabulary mapping (%d differ as typed)" % (d["deviate_from_majority_mapping"], d["differs_on"])))
     if report.get("same_entity"):
         lines.append("## Sources that describe the same entities")
         for p in report["same_entity"]:
@@ -514,7 +552,17 @@ def findings_text(report):
         lines.append("")
     lines.append("## Declarations inferred (correct these and re-run with --spec if any is wrong)")
     lines.append("```json"); lines.append(json.dumps(report["declarations"], indent=1)); lines.append("```")
-    return "\n".join(lines) + "\n"
+    ranked = [x for x in ranked if x[0] > 0]
+    ranked.sort(key=lambda x: -x[0])
+    head = ["# Findings computed from the handover (no declarations)", "",
+            "Every number below came from the files as they are. A finding is not a defect until a person",
+            "has read it against what the code that writes and reads the column says; it is a place to look.", "",
+            "## Largest findings first (rows affected; carry every line into your analysis)", "",
+            "| rows | where | what |", "|---|---|---|"]
+    for n, where, what in ranked[:40]:
+        head.append("| %d | %s | %s |" % (n, where, what.replace("|", "/")))
+    head.append("")
+    return "\n".join(head + lines) + "\n"
 
 
 def discover(folder):
