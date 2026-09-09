@@ -42,3 +42,23 @@ decision discipline was cut; the census moved to the tool, where it runs the sam
 Tool-use note: the slim runs invoked the checker and the census tool from the skill directory in
 most runs; one Haiku run exceeded the line cap (522 lines) and still scored highest, which says
 the cap was binding the full-skill runs' census, as round 3 suspected.
+
+## Addendum - the slim skill in verification mode (the round-1 lab)
+
+The slim skill was measured above on build-mode census. The decision discipline that rounds 3
+and 4 showed lives in verification mode, so the round-1 verifier was run once more with the slim
+skill: same mutated destination, same sealed ten-defect key, same prompt as the two earlier
+verifiers.
+
+| verifier | found (of 10) | inactive-customer balances ($3.0M) | emails dropped to NULL | dormant customers deactivated | service-account stamp |
+|---|---|---|---|---|---|
+| full skill | 10 | WRONG (formula verbatim) | WRONG as landed | WRONG + team | WRONG; story refuted |
+| no skill | 10 | "faithful mess" | "platform constraint" | team call | WRONG, low |
+| slim skill | 10 | WRONG (formula verbatim: no scope, no floor; 149 rows incl. the 3 floored credits) | WRONG (data loss), decision to team | team, blocked at rung 3 as an invented rule | WRONG; story contradicted |
+
+The rule that made the difference in round 4 - a class the transform pre-explains is still a
+class to verify against the code that reads the value - survived the cut: the slim verifier
+recomputed the balance with the destination's own formula and called the class wrong where the
+no-skill verifier had accepted "faithful to the legacy books". The one softer verdict (the
+dormant rule, blocked as a business call rather than declared wrong) is the evidence ladder
+doing what it says at rung 3, not a lost rule. Nothing the slim skill dropped changed a verdict.
