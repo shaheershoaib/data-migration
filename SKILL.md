@@ -3,957 +3,304 @@ name: data-migration
 description: 'Use when moving or reshaping DATA rather than code - a legacy-system migration, a backfill, a bulk import, an ETL, a re-keying, or a one-off correction script over existing rows. Triggers on "migrate the data", "backfill X", "import from the old system", "reconcile the migration", "why is this row wrong since the migration". NOT for schema-only DDL with no data movement (that is an ordinary schema change, handled by expand/contract), and NOT for code-wide mechanical sweeps like a codemod or rename (that is a mechanical code sweep). Applies to any store - relational, document, key-value, warehouse - and to moves between kinds. The defining property: the correctness of the output cannot be observed from the input, so the whole discipline is about proving it on the destination. Also when only a schema dump or an extract has been handed over and the application code for either side has not.'
 ---
 
-# data-migration (the work-type loop for moving data)
+# data-migration (the loop for moving data)
 
-A data migration is the work type where **the easiest thing to measure proves the least**.
-A clean extraction run, matching row counts and a load with no errors are all compatible
-with a completely wrong result. Every failure this skill exists to prevent looked like
-success at the moment it happened.
+In a migration the easiest thing to measure proves the least. A clean run, matching row
+counts and a load with no errors are all compatible with a completely wrong result, and
+every failure this file exists to prevent looked like success at the moment it happened.
+This is the loop for the TRANSFORM only; review, CI and deploy still apply to its output.
 
-**Boundary:** this is the loop for the TRANSFORM only. It does not replace your normal
-review-and-release process - the output still crosses review, CI and deploy like any other
-change. What lives here is the discipline that process cannot supply, because no test on
-the changed code can tell you the data it produced is wrong.
+**Two ways in, one loop.** Either you are about to BUILD the migration (the transform at
+step 4 is yours; steps 5 to 7 prove it) or a migration has ALREADY RUN and you are asked
+whether it is right (the transform is someone else's claim; steps 0 to 3 say what it should
+have done; 5 to 7 are the verdict). Nothing changes between the two but who wrote step 4.
 
-## Start here - three actions before you read the rest
+## Start here
 
-1. **Census the handover with the tool, before forming any opinion about it.** If the folder
-   already holds a `findings.md`, your harness ran it: read that file first, end to end, and carry
-   its numbers into everything below. If not, run
-   `python3 migration_census.py --discover <folder> --out findings.md` - it needs no
-   declarations: it finds the files, merges paginated exports, infers keys, links, cross-source
-   overlaps and the pairs of sources describing the same entities, and writes the findings as
-   sentences with counts, plus the declarations it inferred so you can correct one and re-run
-   with `--spec`. Every number in it is a finding you would otherwise have had to think of, and
-   the ones you would not have thought of are the point. Paste the notable figures into the brief.
-2. **Write the brief** (template under Intake). Fill every line or turn it into a question to
-   a named person. For any side whose code you do not have, the request for that code is the
-   first question.
-3. **Then read the loop in order**, and end with the receipt lines in step 7.
+1. **Census the handover with the tool before forming any opinion.** If the folder holds a
+   `findings.md`, your harness ran it: read it end to end and carry every number below. If
+   not, run `python3 migration_census.py --discover <folder> --out findings.md` (no
+   declarations; it infers sources, keys, links, cross-source overlaps and same-entity pairs,
+   and writes the findings as sentences with counts, largest first). The numbers you would
+   not have thought of are the point.
+2. **Write the brief** (template under Intake): every line filled or turned into a question
+   to a named person. For any side whose code you do not have, the request for that code is
+   the first question.
+3. **Then run the loop in order** and end with the receipt lines in step 7. Every rule
+   below has its reasoning and its worked cases in `references/loop-in-full.md`; read that
+   when a rule seems wrong for your case, not before starting.
 
-**Two ways in, one loop.** Either you are about to BUILD the migration - then the steps run
-in order, the transform at step 4 is yours to write, and steps 5 to 7 prove what you built -
-or a migration has ALREADY RUN and you are asked whether it is right. Then the same loop
-runs with one substitution: the transform is someone else's claim (a script, a vendor tool, a
-colleague's account of what happened), steps 0 to 3 tell you what it should have done, and
-steps 5 to 7 are the verdict. Nothing in the discipline changes between the two; only who
-wrote step 4. Most of this file is the build path.
+## Sizing the loop
 
-If you can read only two sections, read **Sizing the loop** and the five receipt lines in
-step 7: the first says how deep each step goes for the job in front of you, the second is
-what a reviewer will check.
+The loop has one shape; a small job changes how DEEP each step goes, never which steps
+run. Size by four questions: how many rows; does a wrong row cost money, identity or trust;
+is the destination live; can the load be undone. Small and low-stakes: one reach round
+trip, census only the mapped columns, semantics only where a name is not literally the
+meaning, skip 6b with the row count that justifies it. Never shortened at any size: the
+key proof, the coverage arithmetic, the by-value reconcile and the receipt - at small volume
+they are the cheapest steps in the loop. A skipped step is written down with its reason.
 
-## The loop at a glance
+## Intake - the code and the paths, before the schema
 
-The `mechanical` column names the spec section in `migration_check.py` that makes the
-check executable; everything else is judgment the steps below carry.
+A schema is the SHAPE of the data; its MEANING lives in the code that writes each store
+and the code that reads it back for people. A question to the team of the form "what does
+column X mean" or "what fires on insert" is a request for someone to read code you could
+read: ask for the CODE, answer it yourself, and take only the business call to the team.
 
-| step | the question it answers | mechanical |
-|---|---|---|
-| Intake | where is the code that WRITES and READS each side, and how is each store reached? | `evidence` (the rung each decision rests on) |
-| Reach | can you read, move and write end to end - and what does the path cost? | - |
-| 0 census | what mess does the source actually contain? | `key` (uniqueness), `contract` on an extract |
-| 1 contract | what does the destination require - and what does it actually ENFORCE? | `contract` |
-| 2 semantics | does each field mean what its name says? | `counterexamples` |
-| 2b exclusivity | when a row asserts two states, which one wins? | `exclusivity` |
-| 3 keys | do the join keys mean the same thing in both systems? | `key` + `identity` |
-| 3b fallbacks | what happens to values that cannot be mapped? | - |
-| 4 coverage | is every row, column and grain accounted for? | `columns`, `grain`, `coverage` |
-| 4b merge | several sources, one destination: which rows are one entity, which source wins each field, and did every source row land, merge, skip or defer exactly once? | `merge` |
-| 5 reconcile | do the landed values match the source, over the FULL population? | `reconcile` |
-| 6 scope | can the load touch only what it owns - and what does the destination DO on write? | - |
-| 6b scale | does it complete at production size, and can it resume? | - |
-| 6c classes | is the defect's whole CLASS empty, not just the reported row? | - |
-| 7 close-out | can you show destination-side evidence, not a run log? | - |
+**Discover first, then ask ONCE.** Look in the working tree, the project's instruction
+files, the environment and deploy configuration, any connected database tool. Ask only
+for what is missing, as one batch, by ROLE and never by technology:
 
----
+- Source: where is the code that WRITES its store (the application and every other writer:
+  jobs, procedures, imports, scripts); where is the code that READS it for people (screens,
+  reports, exports - these decide the authoritative field); how is the store reached, from
+  where, with what limits; where do the credentials LIVE (a pointer, never values); is it
+  frozen or still taking writes; who owns the data and rules on precedence.
+- Destination: where is the code that WRITES it (models, validation, defaults, hooks) and
+  the code that will READ the migrated rows; how is it reached, and is that path usable for
+  writes at volume; where do credentials live; is it LIVE during the migration; is there a
+  rehearsal environment at production size.
 
-## Sizing the loop - depth scales with the stakes, the shape never does
+"Unknown" and "unavailable" are valid answers; each becomes a receipt line.
 
-The loop has one shape. What a small job changes is how DEEP each step goes, and the
-temptation on a small job is to skip steps rather than shorten them. Skipping changes the
-shape: a two-hundred-row import with no key proof puts two hundred rows on the wrong
-entity exactly as silently as two million, and at two hundred rows the proof costs seconds.
+**The evidence ladder bounds what you may declare.** Rung 1: the code was read; semantics
+and precedence are DERIVED, then tested with counterexample queries. Rung 2: the running
+system was observed (screens, reports, vendor docs); each meaning is a hypothesis carrying
+its observation. Rung 3: schema and census only; a name is not evidence, so at rung 3 you
+do NOT declare field meaning or precedence, however hedged - block the decision, name the
+code or person that unblocks it, and carry on with what the rung supports (types, keys,
+coverage, reach). A mapping declared at rung 3 "with medium confidence" is the face-value
+mapping this file exists to prevent. Rung 1 is the normal case; ask before settling.
 
-Size by four questions before the intake: how many rows; does a wrong row cost money,
-identity or trust; is the destination live; can the load be undone (the rows carry a
-marker that lets them be deleted, or a scoped restore is proven)?
-
-| step | small and low-stakes: hundreds of rows, reversible, nothing money-bearing | large or high-stakes |
-|---|---|---|
-| Intake | the same questions; the brief is ten lines | the full brief |
-| Reach | one round trip | every channel proven and timed |
-| 0 census | uniqueness, value domains and sentinels on the columns you map | full |
-| 1 contract | what the destination enforces versus assumes | + application layer, timezone per column |
-| 2 / 2b | only where a column's meaning is not literally its name; the rung is recorded either way | a counterexample per inferred field |
-| 3 keys | uniqueness and identity match rate, ALWAYS | + partition ambiguous rows, a second key path |
-| 3b fallbacks | count the unmappable and decide | full |
-| 4 coverage | rows and columns, ALWAYS | + grain |
-| 5 reconcile | by value over the full population - at hundreds of rows this is seconds, so there is no reason to sample | full; digests when the extract does not fit the channel (6b) |
-| 6 scope | the tables touched and the marker that lets the load be undone | + side effects, sequences, a rehearsed restore |
-| 6b scale | skipped, with the row count and duration that justify it | full |
-| 6c classes | as reported | as reported |
-| 7 receipt | the five lines in step 7 | full |
-
-Never shortened: the key proof, the coverage arithmetic, the by-value reconcile and the
-receipt. Those are what make it a migration rather than a copy, and at small volume they
-are the cheapest steps in the loop. A step you skip is written down with its reason; a
-step you shorten is written down with its depth.
-
-## Intake - locate the CODE and the PATHS before you read a schema
-
-A schema is the SHAPE of the data. Its MEANING lives in the code that writes each store
-and the code that reads it back for people, and every semantic step below (1, 2, 2b, 3,
-6) is an instruction to read that behaviour. This step is where you get it. Skipping it
-does not make the mapping faster; it moves the reading onto whoever answers your
-questions, one fact at a time, and they answer slower and less completely than a text
-search would.
-
-The tell: a question to the team of the form "what does column X mean", "which field does
-the old screen read", "what fires when a row is inserted" is a request for someone else to
-read code you could read. Ask for the CODE, answer the question yourself, and take to the
-team only the part that is a business call.
-
-**Discover first, then ask ONCE.** Before asking anyone, look: is either application
-checked out in or near the working tree; what do the project's own instruction files and
-docs say; what do the environment files and deploy configuration point at; is a database
-tool already connected. Ask only about what is still missing, and ask it as one batch at
-the start rather than as each later step trips over the gap.
-
-**The questions, by ROLE, never by technology.** The answers will name the technology;
-the questions must not assume one.
-
-For the SOURCE (the system being migrated from):
-- Where is the code that WRITES its store: the application, and every other writer
-  (scheduled jobs, stored procedures, imports, one-off scripts)?
-- Where is the code that READS it for people: screens, reports, exports? These define
-  what the business treats as true, and they decide step 2's authoritative field.
-- How is the store reached (direct, bastion, VM, container, vendor export only), from
-  where, and what limits does that path have?
-- Where do the credentials LIVE - a pointer, such as the application's configuration on
-  its host - never the values themselves.
-- Is it frozen for the migration or still taking writes? Is your access read-only?
-- Who owns the data and can rule on a precedence question?
-
-For the DESTINATION:
-- Where is the code that WRITES its store: models, validation, defaults, hooks? Where is
-  the code that will READ the migrated rows: the screens and filters that render them?
-- How is it reached, and is that same path usable for writes at volume?
-- Where do the credentials live?
-- Is it LIVE, taking application writes, during the migration?
-- Is there a rehearsal environment at production size?
-
-"Unknown" and "unavailable" are valid answers. Each becomes a line in the receipt rather
-than a gap discovered later.
-
-**The brief is OUTPUT, not notes.** Whatever you deliver - a plan, an analysis, a receipt -
-carries the brief as a section, every line either filled in or written as a question to a
-named person. A line you could not fill is a question you have not asked yet. And for any
-side left at rung 2 or 3, the request for that side's code and access is the FIRST question
-in the batch, verbatim, before any question about the data: a data question at rung 3 is
-asking someone to look up an answer the code would give you, and it comes back slower and
-less complete.
-
-**The evidence LADDER, and what each rung lets you declare.** Record which rung each side
-is on:
-
-1. **Code readable** (writers and readers). Semantics and precedence are DERIVED, stated,
-   and then tested with the counterexample queries of step 2.
-2. **Running system observable** (screens, reports, exports, vendor documentation) but no
-   code. Semantics are OBSERVED per field; each is a hypothesis carrying the observation
-   that produced it.
-3. **Schema and census only.** Semantics cannot be derived, so every meaning is a guess by
-   name, and this skill's rule is that a name is not evidence. At this rung do NOT declare
-   field meaning or precedence, however hedged: block that decision, name the code or the
-   person that unblocks it, and carry on with what the rung does support (types, key
-   uniqueness, coverage, reach). A mapping declared here at "medium confidence" is the
-   face-value mapping this skill exists to prevent, wearing a confidence label.
-
-Rung 1 is the normal case, not a luxury: the legacy application usually exists somewhere
-even when nobody thought to hand it over. Ask before settling for rung 3.
-
-**Write the answers into a MIGRATION BRIEF the project owns.** A migration outlives a
-session; re-asking drifts and re-deriving costs. Keep the brief where the project keeps
-its other durable facts (its agent instruction file, a docs directory), reference it from
-there, and READ IT FIRST on every later run so you ask only for what it lacks. The shape:
+**The brief is OUTPUT.** Whatever you deliver carries it as a section:
 
 ```markdown
 # Migration brief: <source> -> <destination>   (as of <date>)
-
 ## Source
-- store: <kind, host or service, database>; frozen: <yes/no/since>; access: <read-only/rw>
-- reached via: <path, from where, limits observed>
-- credentials live at: <pointer>
-- code that writes it: <path or repo>; other writers: <jobs, procedures, scripts, or "none found">
-- code that reads it for people: <screens, reports, exports>
-- evidence rung: <1 code / 2 running system / 3 schema only>
-- data owner: <who rules on precedence>
-
+- store: <kind, host or service>; frozen: <yes/no>; access: <ro/rw>; reached via: <path, limits>
+- credentials live at: <pointer>; code that writes it: <path>; other writers: <...>
+- code that reads it for people: <...>; evidence rung: <1/2/3>; data owner: <who>
 ## Destination
-- store: <...>; live during migration: <yes/no>
-- reached via: <...>; write path proven: <date, batch size, time>
-- credentials live at: <pointer>
-- code that writes it: <models, validation, hooks>; code that reads the migrated rows: <...>
-- fires on write: <hooks, triggers, notifications, recomputes; or "none found">
-- rehearsal environment: <where, size relative to production>
-- evidence rung: <...>
-
+- store: <...>; live during migration: <yes/no>; reached via: <...>; write path proven: <date>
+- credentials live at: <pointer>; code that writes it: <...>; code that reads migrated rows: <...>
+- fires on write: <hooks, triggers, recomputes>; rehearsal environment: <...>; evidence rung: <...>
 ## Open
 - <question> -> <who> -> <blocks which decision>
 ```
 
----
+## Reach
 
-## Reach - can you reach both systems, and what does that path cost?
+Prove read, move and write end to end before designing anything, through the exact
+channels the real load will use, and time them: reading, moving and writing are routinely
+three mechanisms with three limits, and the write path is the one exercised last. Let the
+channel constrain the design (payload caps and time limits decide batch size and where the
+transform runs). An extract that crosses a boundary is a point-in-time snapshot: record
+when. The application's own configuration is the map to its store - host, database, the
+charset the client declares, where credentials come from - read it there before asking.
 
-Every step below assumes you can query the source, query the destination, and write to
-it. When the two live on different networks that assumption is the largest unbudgeted
-cost in the whole job, and it is discovered late, under time pressure, in the middle of
-a load.
+## Step 0 - census the mess, then decide what it means
 
-Establish the path FIRST, and time it:
+The tool prints the numbers (presence split into absent / null / empty and crossed with
+every category; spellings that fold together; ids that are not digits; values with more
+than two decimals; magnitude outliers; dates in the future; dangling links; key uniqueness
+raw and folded; flag-by-category crosstabs; overlaps and same-entity pairs across sources,
+with only-in-each and the rows that deviate from the majority vocabulary mapping). What it
+cannot do is decide, and these decisions are yours before any mapping:
 
-- **Prove the read and the write end to end before designing the transform** - a trivial
-  round trip, one row out and one row back, through the exact channel the real load will
-  use. A path that works for a SELECT can fail for a write: execution channels vary in
-  whether they allocate a terminal, how large a payload they accept, and how long they
-  stay open.
-- **Expect the "channel" to be several channels.** Reading the source, moving the data,
-  and writing the destination are routinely three different mechanisms with three different
-  limits, and proving one says nothing about the others. Prove each end to end. The write
-  path is the one that surprises people, because it is the one exercised last.
-- **Let the channel constrain the design, not the other way round.** Payload caps and
-  time limits decide batch size and whether the transform runs where the data is or where
-  you are. Discovering the cap mid-load turns a transform into an outage.
-- **An extract that crosses a boundary is a point-in-time SNAPSHOT.** Record when it was
-  taken. Everything created in the source afterwards is invisible to it, which is the same
-  staleness trap as a hand-supplied mapping artifact, arriving by a different route.
-- **The application's own configuration is the map to its store.** Host, port, database
-  name, the charset the client declares, and where the credentials come from all sit in the
-  code intake located; read them there before asking anyone, and carry the declared charset
-  into step 6b.
+- **Soft deletes**, per table: find every "not really here" marker the source uses and say
+  whether it migrates. Usually migrate the row, carry the marker, confirm the destination's
+  filters honour it - which starts with checking the destination HAS the column.
+- **Sentinels** are missing, not data: a placeholder name, a zero meaning "not calculated".
+- **Orphans**: decide their disposition now, not at load time.
+- **Two sources describing the same entity** (a mirror and its record, an export and its
+  API): run `migration_check.py` between them, one as source and one as destination, with
+  `key` and `reconcile`, so only-in-one, only-in-the-other and differing values are counts
+  before any decision about which one wins.
+- **Schemaless sides**: absence is not null; a field's type varies between documents;
+  embedded arrays are the grain (assert their length); denormalized copies must all be
+  updated; array order usually means something.
 
-If the path is slow or fragile, that is a fact about the migration, not an obstacle to
-push past quietly. Budget it.
+Write the census down. It is the evidence for every decision that follows.
 
----
+## Step 1 - the contract comes from the DESTINATION
 
-## Step 0 - census the source's MESS before designing the transform
+Read the destination and write what it requires: types, enum membership, ranges,
+required-ness, referential integrity, precision (money in minor units). Pin the timezone of
+every datetime column on both sides; convert per row with a zone-aware library, never an
+offset constant, and recompute every datetime over the full population - spot rows on a DST
+boundary prove the method, not the data. Then enumerate what the destination actually
+ENFORCES: free-text enums, unenforced foreign keys, permissive parsing, implicit truncation
+all accept wrong data and report success, and the weaker the enforcement the more the proof
+sits on you. The contract includes what the APPLICATION enforces on its own writes - read
+its models, validators and defaults, because a direct load bypasses them - and if migrated
+rows are meant to be distinguishable by a marker, CHECK the marker on the landed data.
 
-Legacy data is inconsistent in ways its schema does not admit, and every one of those
-inconsistencies becomes a silent defect downstream. Before writing any mapping, measure:
+## Step 2 - semantics from behaviour, never from names
 
-- **Key uniqueness.** For every key you intend to join on: `GROUP BY key HAVING COUNT(*) > 1`.
-  A natural key that maps N:1 resolves to whichever row it hits first. If it is not unique,
-  do NOT fall back to the surrogate id: across two systems the ids are unrelated
-  (step 3). Record the collision count and the values causing it; step 3 decides what
-  happens to them.
-- **NULL conventions.** Which columns are nullable, and what does NULL MEAN? A common
-  convention is "this FK is NULL, so the identity lives in these other columns" - a
-  transform that copies only the FK drops those rows' identity entirely.
-- **Value domains.** For each column that will land in a constrained destination field:
-  the DISTINCT set actually present. Legacy free-text columns routinely contain values
-  outside the enum you are mapping to, plus casing and whitespace variants.
-- **Orphans and dangling references.** Rows whose parent no longer exists - and DECIDE their
-  disposition here, not at load time. Under an enforced FK they abort the batch; under an
-  unenforced one they land dangling and the application renders a blank where a parent belongs.
-- **Soft deletes.** Find every "not really here" marker the source uses - `deleted_at`,
-  `is_deleted`, a status code, an archive table, a row the legacy UI filters out - and state
-  per table whether it migrates. Both defaults are wrong on their own: migrating them
-  resurrects records the business deleted, and dropping them orphans the live rows that still
-  reference them. The usual answer is to migrate the row, carry the marker, and confirm the
-  destination's own filters honour it - which starts with checking the destination HAS that
-  column at all.
-- **Type reality.** A column typed `varchar` that holds numbers will parse - until the one
-  row that does not. Money and dates are where this bites.
-- **Encoding reality.** Mojibake and double-encoded UTF-8 (`Ã©` where `é` belongs) survive
-  every row count and most contracts. Census the non-ASCII values in name-like columns
-  before the extract locks them in.
-- **Duplicates and near-duplicates** on the natural identity.
+A field means what the producing system DOES with it. For each column you map, find in the
+code: its WRITERS (every assignment; two writers that disagree are step 2b before a row is
+queried), its READERS (the one the business reconciles against is authoritative; a column
+nobody reads is a candidate for dropping), its CONSTANTS (enum vocabularies, prefix and
+composite-key conventions), its VALIDATION (what the application refuses to write). A text
+search is enough. Every inferred meaning is a HYPOTHESIS: write the counterexample query -
+rows where the name predicts one thing and the authoritative field says another - and the
+count is the blast radius. Where there is no code (rung 2 or 3), say so at the decision and
+do not fill the gap with the name.
 
-**Run `migration_census.py` FIRST, then read.** Every bullet above is a query someone has
-to write per dataset, and that is where a census goes wrong: the wrong two sets compared,
-case never folded, two sources never put side by side. The tool beside this file prints the
-numbers - presence split into absent / null / empty, and absence crossed with every category
-(the terminated rows with no date); spellings that fold together; id-like values that are not
-digits; values with more than two decimals; dates in the future; dangling links against a
-target's keys; key uniqueness raw and folded; a crosstab of every flag against every
-categorical column (a row asserting two contradictory things shows up there before you know
-what the columns mean); overlaps between two sources' attributes with case folding and array
-membership; and, for two sources describing the same entities, only-in-one, only-in-the-other
-and the rows whose same-named values deviate from the majority vocabulary mapping. With
-`--discover <folder>` it infers all of that from the files alone and writes `findings.md`;
-with `--spec` you declare it. Read the output before writing a single mapping line; paste the
-notable figures into the brief. It does not replace the reading of the code - it tells you
-where to look.
+## Step 2b - mutually exclusive states: declare which wins
 
-**Two sources describing the same entity get compared like source and destination.** A
-mirror and its system of record, two systems each holding the customers, an export and the
-API it was taken from: run `migration_check.py` between them during the census, one declared
-as `source` and the other as `destination`, with `key` and `reconcile` over the shared
-columns. Only-in-one, only-in-the-other and shared-key-with-differing-values come out as
-counts before any decision about which one wins, and the differing-values count is the size
-of the survivorship decision step 4b will have to make.
+A success flag set on submission and never cleared sits beside the status that records the
+outcome; the row asserts two states. Count the contradictions first; declare the precedence
+highest first and say WHY in business terms (if you cannot, it is a question for the data
+owner, not a default); verify the destination honoured it for every affected row; and find
+every downstream reader of the losing flag, or the defect reappears through a filter.
 
-Write the census down. It is the evidence for every scoping decision that follows, and it
-is what makes a later "we did not know" false.
+## Step 3 - prove the join keys before any bulk operation
 
-## Step 0b - if either side is SCHEMALESS, census the SHAPE as well as the values
+An id present in both systems is not evidence it means the same thing: ids get
+re-sequenced, reused, scoped per tenant (then the key is the PAIR, in every join, every
+reconcile, every delete). Validate each key against an independent human-readable
+attribute and report the match rate, raw and folded, both ways; the gap is rows whose match
+depends on a rule the two systems do not share. A sentinel in the key column ("NULL", "0")
+force-maps everything to one row: filter at the source and dedup maps to the single real
+value. When a natural key maps N:1 and there is no shared surrogate, do not pick a match:
+partition the ambiguous rows, land the rest, find the ambiguous ones a DIFFERENT key path
+with its own uniqueness and match-rate proof, and report the deferred count in coverage.
 
-Everything above assumes a fixed set of fields. A document store does not give you one, and
-the discipline has to census the shape itself. Where the source is documents, or the
-destination is:
+## Step 3b - the fallback for values that cannot be mapped
 
-- **Field ABSENCE is data, and it is not the same as null.** In a table every row has every
-  column; in a collection a field can be missing on 30% of documents, and "missing", "null"
-  and "empty string" are three different states that a naive transform collapses into one.
-  Count each field's presence rate across the whole collection before mapping it, and decide
-  per field which of the three the destination should hold.
-- **A field's TYPE varies between documents.** The same key holds a string on old documents
-  and a number on newer ones, or a single object where later writes put an array. Census the
-  distinct types per field, not just the distinct values - a destination with real types
-  rejects the minority, and one without silently stores both.
-- **Embedded collections are the grain**, and they are where the flattening defect lives. An
-  array that loses a member is invisible to every document count: the document is present,
-  its identifier matches, and one order or one line item is gone. Assert the LENGTH of every
-  embedded array on both sides, per document.
-- **Denormalized copies must ALL be updated.** Without joins, the same customer name may be
-  embedded in a thousand order documents. Fixing the customer record fixes nothing the reader
-  sees. Enumerate every place a value is copied and reconcile each - this is the twin sweep,
-  and in a document store it is the normal case rather than the exception.
-- **Ordering inside an array is usually meaningful** and is trivially lost by a transform
-  that rebuilds rather than copies. Compare arrays as sequences, not as sets, unless you have
-  established the order carries no meaning.
+Count the affected rows before choosing. Prefer deriving from an authoritative related
+record over a constant, but only where the parent's value was true when the child was
+written - inheriting today's address onto a 2019 document rewrites history. Mark
+fallen-back rows so they stay identifiable. Transformed + fallen back + skipped must sum
+to the input; unmappable is never silently skipped.
 
-`migration_check.py` reads JSONL and JSON as well as CSV, and addresses nested fields by
-dotted path (`address.city`), so every check below applies unchanged. Arrays are compared
-both as content and as a `field[]` length, which is what catches the lost member.
+## Step 4 - transform, and state coverage
 
-## Step 1 - derive the contract from the DESTINATION
+Rows in scope / transformed / skipped with reasons. Columns mapped / deliberately dropped /
+defaulted - a row census cannot see a column that was never carried. Grain on both sides,
+with the cardinality checked. Every hand-supplied artifact carries a date compared against
+the data it maps; older is stale by construction.
 
-Read the destination schema and write the contract it actually requires: types, enum
-membership, ranges, required-ness, referential integrity, precision (money in minor units,
-timezone handling for dates).
+## Step 4b - many sources, one destination: the merge
 
-**Pin the timezone of every datetime column on both sides, and write it down.** Legacy stores
-are routinely naive local time with no offset recorded. A destination column typed with a
-zone, or an application assuming UTC, then REINTERPRETS those values instead of converting
-them, and every timestamp moves by the offset - uniformly, which reconciles as a formatting
-class and is a real shift. DST makes it worse than a constant: the offset depends on each
-row's own date, so one correction factor is wrong for half the year. And a date-only value
-that crosses midnight changes the BUSINESS date - a posting date, an invoice date, a period
-boundary - silently moving the row into a different reporting period. State the source zone
-and whether it observes DST, state the destination's storage convention, convert per row with
-a zone-aware library rather than an offset constant, and reconcile by value on a row from each
-side of a DST boundary and a row at 23:00 and 00:30 local. Those spot rows prove the METHOD;
-they do not prove the data. A transform that caches one offset per calendar day converts every
-spot row correctly and is still an hour wrong for every row after the clock change on a
-transition day, so recompute every datetime column over the full population with the
-zone-aware conversion and require zero mismatches, the same as any other value in step 5.
-
-**Then enumerate what the destination actually ENFORCES.** This is the step everyone skips.
-Enums stored as free text, foreign keys declared without constraints, permissive numeric or
-date parsing, implicit truncation - each means the store will accept wrong data and report
-success. **The weaker the enforcement, the more the burden of proof sits on your own
-validation**, and the less a clean load tells you.
-
-The contract includes what the APPLICATION enforces on its own writes, not just the schema:
-a direct load bypasses ORM validation, model defaults, normalization and stamping
-(created_by, timestamps). Either replicate those in the transform, or record that migrated
-rows are deliberately distinguishable - a decision made on the record, not a gap found
-later. Then CHECK the marker on the landed data: count the rows that violate it. A recorded
-decision that a NULL stamp marks a migrated row, next to a thousand migrated rows stamped
-with a service account, is a decision the data did not follow.
-
-That application layer is code, and intake told you where it is: read the model
-definitions, validators and defaults for every table you load, not the schema alone. A
-schema that says a status is ten free characters and a model that says it is one of five
-choices are two different contracts, and the load has to satisfy the one the application
-will read by.
-
-## Step 2 - derive SEMANTICS from behaviour, not names
-
-A field's meaning comes from what the producing system DOES with it, never from what it is
-called. A boolean named for success may be set on submission and never cleared on failure.
-A timestamp may never be populated. Where two columns disagree, find which one the legacy
-system itself treats as authoritative - usually the one its own UI and reports read.
-
-**Where behaviour lives, and how to read it - the same four searches in any stack.** For
-each column you will map, find in the code intake located:
-
-- its **WRITERS**: every assignment - the model save, the raw SQL write, the scheduled job,
-  the stored procedure. Each writer is a candidate meaning, and a column with two writers
-  that disagree is step 2b's contradiction found before a single row is queried.
-- its **READERS**: every filter, report, export and screen that consumes it. The reader the
-  business reconciles against is the authoritative one. A column no reader consumes is a
-  candidate for dropping in step 4, not for mapping.
-- its **CONSTANTS**: enum definitions, status vocabularies, magic values, and the format of
-  any composite or prefixed identifier - naming conventions live here and nowhere in the
-  schema.
-- its **VALIDATION**: what the application refuses to write, which is step 1's "what the
-  application enforces" seen from the source side.
-
-You are not learning the framework; you are following one column through it, and a text
-search is enough. The code tells you what SHOULD have written the column; the census tells
-you what DID. Jobs, one-off scripts and years of manual fixes leave rows no current writer
-produced, so the writer supplies the hypothesis and the counterexample query below tests
-it. Where there is no code to read (rung 2 or 3 at intake), say so at the decision and do
-not fill the gap with the name.
-
-For any field whose meaning you inferred rather than observed, that inference is a
-HYPOTHESIS - and a hypothesis is testable, so **write the COUNTEREXAMPLE QUERY**: find the
-rows where the name predicts one thing and the authoritative field says another. Zero rows
-supports the inference; any rows refute it, and the count tells you the blast radius.
-
-This is the single cheapest check in the whole loop. "Is this flag really what it says?"
-becomes `WHERE looks_successful = 1 AND authoritative_status IN (<failure states>)` - one
-query, an exact number, no opinion, in seconds, before a single row is migrated.
-
-## Step 2b - resolve MUTUALLY EXCLUSIVE states, and declare which one wins
-
-Legacy rows routinely assert two things that cannot both be true: a success flag written
-when an operation is SUBMITTED, never cleared when it later fails, sitting beside the status
-field that records the real outcome. The row says both "succeeded" and "failed".
-
-**Detecting the contradiction is the easy half. The expensive half is which one WINS.** A
-transform that reads the flag rather than the authoritative status migrates failures as
-successes, and the result looks complete - full row counts, no errors, money in the wrong
-state. Precedence is a business rule, not a technical one: a bounced payment is not money
-received, a cancelled order is not fulfilled, a superseded record is not current.
-
-So:
-1. **Find the contradictions before mapping** - `WHERE flag = 'success' AND status IN
-   (<failure states>)`. The count is the blast radius and it decides how much this matters.
-2. **Declare the precedence explicitly**, highest first, and say WHY in business terms. If
-   you cannot state why one wins, that is a question for whoever owns the data, not a
-   default to pick quietly.
-3. **Verify the destination honoured it for every affected row** - not a sample. This is the
-   `exclusivity` check in `migration_check.py`: source contradictions are REPORTED (the mess
-   belongs to the legacy system) while precedence violations FAIL (resolving it the wrong way
-   round is yours).
-4. **Never let the losing flag survive into a downstream filter.** The original damage is
-   usually compounded by a query that later selects on the flag rather than the resolved
-   status - fix the value, then find every reader of it. Correcting the data and leaving a
-   downstream query still filtering on the losing flag reproduces the same defect.
-
-## Step 3 - prove the join keys BEFORE any bulk operation
-
-An id present in both systems is not evidence it means the same thing. Ids get
-re-sequenced at migration, reused, or scoped per-tenant.
-
-**A tenant-scoped key is not a key.** Where the source scopes ids or numbers per tenant, per
-company or per branch, the join key is the PAIR (tenant, key) and nothing else. Joining on the
-bare key attaches one tenant's rows to another's at full row count with no error, and unlike
-everything else in this file that one is a disclosure incident rather than a wrong number. It
-also poisons the census: `GROUP BY key HAVING COUNT(*) > 1` flags a sound per-tenant key as
-ambiguous and sends clean rows into the deferred pile. Group by the pair, and carry the tenant
-predicate into every join, every reconciliation query and every delete in the load.
-
-Validate each key against an **independent human-readable attribute** - a name, a document
-number, a natural key - and state the match rate.
-
-**Normalize both sides yourself, and report the match rate BOTH ways.** The two systems do not
-share a comparison rule: a case- and accent-insensitive collation matches "ABC Corp", "abc
-corp" and "ABC Corp " where the same comparison in your transform language does not, and
-trailing spaces are significant in some engines and ignored in others. Compare raw, then
-compare case-folded and trimmed, and report both numbers. The GAP between them counts the rows
-whose match depends on a rule the two systems do not agree on - each one either a false miss
-you are about to defer or a false merge attaching two real entities to one row, and which it is
-gets decided by looking at them, not by picking a collation.
-
-A wrong key does not fail loudly: it
-produces a complete-looking result in which every row is attached to the wrong entity, and
-that is indistinguishable from success without this check.
-
-**A sentinel in the KEY column force-maps everything to one value.** The worst bad join is
-not a missing key, it is a placeholder that LOOKS like one. An extract that renders NULLs as
-the literal text `"NULL"`, or a legacy default of `"0"` / `"000"`, becomes a real map key:
-every record with no true key collides on it and is force-mapped to one arbitrary value, at
-full row count, with no error anywhere. Filter the extract at the SOURCE
-(`WHERE key IS NOT NULL AND key NOT IN (<junk set>)`) rather than downstream, and when you
-build a key-to-value map, dedup to the single REAL value - otherwise last-seen-wins quietly
-decides, and a placeholder shadows the real one.
-
-**Across two systems there is often no shared surrogate at all.** "If the natural key is
-not unique, join on the surrogate id" is within-database advice: ids get re-sequenced at
-migration, so the destination's id and the source's id are unrelated even where both
-exist. That leaves the case with no clean answer - a natural key that maps N:1, and no
-surrogate to fall back to.
-
-Do not resolve it by picking a match. Instead:
-
-1. **Partition the rows by whether the key is ambiguous**, and count both sides. Ambiguity
-   is usually concentrated, not spread: placeholder and filler values (repeated digits,
-   empty-equivalents, a default the legacy UI wrote when the field was skipped) generate
-   most of the collisions, and they are recognisable.
-2. **Land the unambiguous rows now.** They are the majority and they are provable.
-3. **Find the ambiguous rows a DIFFERENT key path** - usually not a coarser grain of the
-   key that just failed. When the ambiguity comes from placeholders, those rows have no
-   usable key at all, so there is nothing to re-join more loosely; what they need is
-   another route from source to destination entirely, typically through an owning entity
-   that both systems identify unambiguously. That is a new source-to-destination key
-   chain, and it earns its OWN pass through this step - its own uniqueness check and its
-   own match rate against an independent attribute. Inheriting confidence from the first
-   key path is exactly the mistake this step exists to prevent.
-4. **Report the deferred count as part of coverage.** A phase you named is a decision; a
-   phase you silently dropped is the "it ran clean over a subset" failure wearing a
-   different hat.
-
-## Step 3b - decide the FALLBACK for values that cannot be mapped
-
-The census finds values with nowhere to land: outside the destination's enum, malformed,
-or absent. Finding them is not the decision. What happens to those rows is, and left
-unstated it gets made row-by-row by whatever the code does when a lookup misses - usually
-NULL, or a default nobody chose.
-
-- **Treat SENTINELS as missing, not as data.** A placeholder where a name belongs, a
-  synthesized address, a zero that means "not calculated yet" rather than zero: each migrates
-  cleanly and is wrong, because nothing downstream can tell it from a real value. Enumerate
-  the sentinels the source actually uses during the census, and decide per column whether each
-  becomes NULL, a fallback, or a counted skip.
-- **Count the affected rows before choosing.** A fallback applied to nine rows and one
-  applied to nine thousand are different decisions, and the count is what tells you which
-  one you are making.
-- **Prefer DERIVING the value from an authoritative related record over a constant** - but
-  only where the parent's value is the one that was true WHEN THE CHILD WAS WRITTEN. It is
-  wrong the moment the parent is mutable and the child is a point-in-time record: an invoice,
-  a ledger entry, a statement, anything a person will later read as a record of what was true
-  on its date. Inheriting the CURRENT address, rate or owner onto a 2019 document rewrites
-  history, and that is worse than a constant, because it looks authoritative and re-derives to
-  the same wrong answer every time anyone checks it. Ask first whether the parent's field has
-  a history - an audit table, an effective-dated row, a superseded record - and if it does,
-  join on the child's date. If it does not, the value is not recoverable: take a marked
-  fallback or a counted skip, and say which. A
-  child row missing a dimensional value can often inherit it from its parent, which is
-  both more likely correct and re-derivable later. A hardcoded default is unfalsifiable
-  after the fact: nothing distinguishes a row that genuinely held that value from a row
-  that fell back to it.
-- **Mark fallen-back rows so they stay identifiable**, or record their keys. Otherwise the
-  decision dissolves into the data and cannot be revisited when someone asks how many rows
-  were guessed.
-- **Never let unmappable mean silently skipped.** Every row is transformed, deliberately
-  fallen back, or skipped with a counted reason. Those three must sum to the input.
-
-This step is cheap at design time and awkward to retrofit: marking and counting fallbacks
-is a line of code before the transform is written and a re-review afterwards. If you reach
-it late, the count is what lets you choose honestly - a small, non-money-bearing fallback
-set can be an ACCEPTED untraceability, recorded as such with its number, while a large or
-money-bearing one is worth the retrofit. Deciding that is legitimate; leaving it unstated
-is not.
-
-## Step 4 - transform, and state COVERAGE
-
-Report rows **in scope / transformed / skipped**, with the reason for each skip. "It ran
-clean" over a subset is not completeness - a transform that silently covers half its domain
-looks identical to one that covers all of it.
-
-**Census COLUMNS, not just rows.** A row census cannot see a field that was never carried:
-every row moves, one column is silently absent, and the count is perfect. Enumerate the
-source's columns against the destination's and account for each as **mapped / deliberately
-dropped / defaulted**. A dropped column is a decision; an unlisted one is an accident.
-
-**Assert the GRAIN survived.** A transform that collapses a one-to-many into a one-to-one -
-per-contact rows flattened to per-customer, per-line detail summed to a header - destroys
-information while every row count still reconciles. State the grain on both sides and check
-the cardinality: if the source had N children per parent and the destination has one, say
-whether that was intended and what was lost.
-
-Anything hand-supplied (a spreadsheet, an extract, a mapping file) carries **provenance**:
-name the artifact and its date, **and compare that date against the data it maps**. An
-artifact older than the extract it is being applied to is stale by construction - it cannot
-know about anything created since. Staleness is invisible in the output, so it has to be
-caught on the input.
-
-## Step 4b - many sources, one destination: the MERGE
-
-Consolidating several systems into one store is this loop run once per source, plus one
-step the single-source loop does not have: deciding which rows ACROSS sources are the same
-entity, and which source's value wins each field. Everything above still runs per pair -
-each system's code located at intake, its own mess censused, its own semantics read from its
-own writers, its keys proven against the destination, its coverage stated. Do not shortcut
-the per-pair work because the sources "hold the same kind of thing": the same column name in
-two systems means two different things more often than not (status vocabularies, what an
-empty email means, whether an id is per tenant), and a merge built on unproven pairs merges
-noise.
-
-Then the merge itself, which has the shape of the whole loop in miniature:
-
-**Census the OVERLAP before designing the match.** For every pair of sources, how many
-entities appear in both, measured on an independent attribute normalized the same way on both
-sides (step 3), raw and folded, both directions. The expected duplicate rate is a number you
-measure, not one you assume: a match rule tuned to a guess over-merges or under-merges at
-full row count with no error anywhere.
-
-**Declare the MATCH RULE, with its evidence rung.** Which attributes must agree for two rows
-to be one entity: a key genuinely shared between systems, or a natural key plus a second
-independent attribute; never a name alone. The rule is a semantic decision, so it carries a
-rung from intake, and at rung 3 it is blocked. Where the rule is probabilistic, the threshold
-is a business decision with a measured cost on each side (false merges versus false splits),
-not a library default.
-
-**Declare SURVIVORSHIP per field, with its rung.** When two sources hold different values for
-one field, one source wins that field: the system whose code actually maintains it (its
-writers), the one its business reconciles against (its readers), or the most recently written
-value where the timestamp is trustworthy. This is step 2b's precedence rule between SYSTEMS
-instead of between columns - declared highest first, one line per field, justified from the
-code. Losing values are not discarded: they go to a conflict list with the reason the winner
-won, so the ruling can be revisited when a field turns out wrong.
-
-**Keep a MERGE LEDGER; it is the coverage arithmetic across sources.** One row per source
-row: (source, source key, destination key, action), where action is `landed` (this row became
-the destination row), `merged` (folded into another row's destination row), `skipped` (with
-its reason) or `deferred` (ambiguous match, parked). Every source row appears exactly once,
-so that the sum over sources equals destination rows + merged + skipped + deferred, and a row
-lost between systems is a missing ledger line rather than a count that happens to balance.
-The ledger is also the provenance: which system produced each destination row and which rows
-it absorbed. Carry a per-source external reference on the destination row too (`crm:1042`,
-`billing:AC-9`), because a consolidated row with no provenance cannot be traced back when one
-field is wrong.
-
-**Hunt the two SILENT errors over the full population.** A FALSE MERGE (two real entities
-folded into one row) and a FALSE SPLIT (one entity left as two rows) both reconcile clean per
-pair: every landed value equals its own source. False merges: within every merged group,
-compare an independent attribute the match rule did NOT use (a second email, a tax id, a
-date of birth); groups whose members disagree are candidates, and each is looked at. False
-splits: among landed rows, attribute values shared by two or more destination rows are
-candidates. Report both counts in the receipt. A merge with zero candidates of either kind, on
-a population where the overlap census promised duplicates, is a match rule that did nothing.
-
-**State the SNAPSHOT SKEW.** N sources are N snapshots at N times. A relationship that crosses
-sources - an order in one system for a customer whose record in another was extracted two
-days later - can be inconsistent by construction. Record every snapshot time; freeze the
-sources together where you can; where you cannot, name the cross-source relationships that can
-be skewed and reconcile them after cut-over against the frozen set.
-
-**Then steps 5, 6 and 7 run on the merged destination.** Reconcile by value per pair, with
-the ledger and the survivorship rule saying which source value each destination field should
-equal; scope the load to what the merge owns; the receipt carries the sixth line from step 7.
-The `merge` section of `migration_check.py` makes the ledger arithmetic and the two candidate
-counts mechanical.
+Run the loop once per source first; the same column name means different things in two
+systems more often than not. Then: census the OVERLAP on an independent attribute before
+designing the match; declare the MATCH RULE with its rung (never a name alone; at rung 3 it
+is blocked); declare SURVIVORSHIP per field with its rung - step 2b between systems, justified
+from whose code maintains the field - and keep losing values in a conflict list; keep a MERGE
+LEDGER (source, source key, destination key, landed / merged / skipped / deferred) so that
+source rows = destination rows + merged + skipped + deferred, with per-source provenance on
+every destination row; hunt FALSE MERGES (members of one group disagreeing on an attribute
+the rule did not use) and FALSE SPLITS (landed rows sharing one) over the full population;
+state the SNAPSHOT SKEW between N extracts taken at N times. Then steps 5 to 7 run on the
+merged destination. The checker's `merge` section makes the ledger arithmetic and the two
+candidate counts mechanical.
 
 ## Step 5 - reconcile BY VALUE over the FULL population
 
-Not a sample, and not row counts. Compare the destination's values against the source of
-truth for every row and report the **count of mismatches**; require zero, or explain each
-class that remains.
+Not a sample, not counts. Fix the comparison rule first: money as integers in minor units,
+never float equality; state every normalization you apply, because each is a difference you
+decided not to see; compare RAW before folded and report the gap as rows to inspect (a
+re-cased legal name or a changed Unicode form renders identically and fails every exact
+lookup); report the summed signed difference as well as the count. A UNIFORM mismatch class
+(same sign, factor or offset) is a systematic defect. "Explain each class" means naming the
+transform line that produces it and why it is correct - and a class the transform
+PRE-EXPLAINS in a comment is still a class to verify against the code that reads the value:
+if the reason cites a rule, system or import that neither codebase nor the handover
+contains, the class is OPEN. Denormalized and summary fields are recomputed with the
+destination's own formula, verbatim, over every row; a filter or floor the formula does not
+have reproduces the defect.
 
-**Fix the comparison rule before you run the comparison, or the reconciliation reports its
-own artifacts.** Compare money as integers in minor units; never float equality, and never a
-DECIMAL against a DOUBLE. Normalize both sides identically (trim, case, NULL versus empty
-string) and state which normalizations you applied, because each one is a difference you have
-decided not to see. Report the summed signed difference as well as the row count: a
-one-cent-per-row truncation over two million rows is $20,000 that a mismatch count never shows.
+## Step 6 - scope the load; protect what the destination owns
 
-**A UNIFORM mismatch class is the dangerous one.** Differences sharing a sign, a magnitude, a
-factor or a constant offset are a systematic transform defect - truncation where the source
-rounds, minor units against major, a timezone shift - not noise. "Explain each class" means
-naming the line of the transform that produces it and why that behaviour is correct. A class
-you can only describe is a class you have not explained.
+Name the tables the transform owns and the ones it never touches (a reload of "all tables"
+destroys users, roles and everything created since cut-over). Exclude rows another process
+depends on in their CURRENT state. Read what the destination DOES on write - hooks and
+signals in the application, triggers and FK actions in the store; a direct load bypasses
+the first layer and still fires the second - and disable deliberately, on the record. Reset
+id sequences after explicit inserts. Prove a restore SCOPED to the owned tables before the
+load; if the destination is live, roll-forward is the only direction, said before batch one.
 
-**A class the transform pre-explains is still a class to verify.** The comment or docstring
-beside the line that produces a mismatch is a claim by the person who wrote the defect, and the
-most dangerous classes arrive with a plausible reason attached: a status rewritten "because the
-destination's validator defines paid_at as money received", a fallback to NULL "because the
-model would reject the value", a window left unconverted "because an earlier import stored
-UTC". Check the reason against the code that READS the value (the destination's own filters,
-formulas and screens) and against the source's writers, and against the handover facts. If the
-reason cites a system, a rule or an import that neither codebase nor the handover contains, the
-class is OPEN, not explained.
+## Step 6b - production scale, and a run that resumes
 
-**Compare raw before you compare folded.** Every normalization you apply (trim, case, Unicode
-form, NULL against empty) is a difference you have decided not to see, so run the raw comparison
-first and report the raw-versus-folded gap as ROWS TO INSPECT, not as a rule to accept: a legal
-name re-cased, or stored in a different Unicode normalization form, renders identically on a
-screen and fails every exact-match lookup afterwards. Compare bytes, not glyphs.
+Rehearse at production SIZE. Batch by an indexed key, never one transaction; run detached
+and poll. Make the load idempotent on a key observable in the destination alone, checked at
+the grain of the whole unit of work and written in one transaction - otherwise persist which
+source rows were applied as a table in the destination. Know which constraint failures abort
+the batch. Declare the charset at every hop; round-trip one non-ASCII row byte for byte to
+prove the channel, then compare every non-ASCII value byte for byte after the load. Name the
+columns in every load statement. Plan the DELTA before the load: freeze the source or name a
+delta pass, and reconcile after cut-over. When the extract does not fit the channel, move
+DIGESTS (per-row, over the normalized mapped columns, built identically on both sides) and
+pull full rows only for differing keys; run the census where the data is and move results. If
+the source keeps writing, the loop runs per sync against a common WATERMARK; a source with no
+change marker has no delta, only a full re-compare. Keep schema (DDL) and data (DML) as
+separate migrations; an applied migration is immutable.
 
-This is also how a denormalized or summary field is caught drifting from the records it
-summarises: derive the value from the authoritative rows, compare against the stored one
-across the whole population, and emit a backfill for the difference. Derive it with the
-destination's OWN formula, taken verbatim from the code that maintains the field, over EVERY
-row: a recompute that adds a filter the formula does not have (active customers only), or a
-floor the formula does not have (a balance cannot be negative), reproduces the defect it was
-meant to catch.
+## Step 6c - a defect in one row is a class
 
-## Step 6 - scope the load, and protect what the destination OWNS
+Write the predicate that selects it, run it over the whole table, fix every match, and
+close on the class being EMPTY, never on the reported row being right.
 
-A destination accumulates rows the source never had: users, roles, permissions, settings,
-anything created after cut-over. **A reload scoped to "all tables" destroys them.** Scope
-every load to the tables the transform owns, and name the excluded tables explicitly.
+## Step 7 - the receipt
 
-**Check what is IN-FLIGHT before a bulk mutation on a shared path.** A record another
-process depends on in its CURRENT state - a batch awaiting a response, a job mid-retry,
-anything a downstream system has already been told about - must not be advanced underneath
-it. The transform is correct in isolation and still breaks the system, which is exactly why
-a row-level review never catches it. Identify the in-flight states before the write and
-exclude them.
-
-**Know what the destination DOES on write before a bulk load.** Triggers, webhooks,
-notification sends, audit hooks, denormalized recomputes: a load that fires per-row side
-effects is an incident, not a migration - two million rows can be two million emails.
-Enumerate the write-path side effects, disable or route around them deliberately, and
-re-enable afterwards, with both halves on the record.
-
-Those side effects are in the destination's CODE, at two layers: the application's write
-path (model hooks, signal receivers, queue publishers, denormalized recomputes) and the
-store's own (triggers, foreign-key actions). A direct load bypasses the first layer and
-still fires the second, so read both for every table you load - intake told you where -
-and list what fires before choosing the load path.
-
-**Reset the destination's id sequences after loading explicit keys.** Auto-increment and
-sequence counters do not follow explicit inserts everywhere; the first application insert
-after cut-over collides with a migrated id. No check on the migrated data can see this
-defect - it lives in FUTURE rows - so it has to be a step, not a finding.
-
-Destructive operations get a restore path proven BEFORE they run, not discovered after - and
-the restore has to be SCOPED the way the load was. A point-in-time restore of the whole
-database is the "all tables" mistake pointed backwards: it reverses every application write and
-every destination-owned row created since the timestamp, which on a live destination is real
-users' work, including the tables the top of this section told you to protect. Prove a restore
-of exactly the tables the transform owns - snapshot those before the load, restore those. If
-the destination is live and taking writes, roll-FORWARD is the only available direction: say so
-before the first batch, not after one fails.
-
-## Step 6b - rehearse at PRODUCTION SCALE, and make the run resumable
-
-Borrowed from the established schema-migration practice, because a data transform fails at
-scale in ways it never fails on a sample - and the failure mode is usually worse than the
-bug:
-
-- **Rehearse on production-SIZED data, not production-shaped data.** A transform verified on
-  a thousand rows tells you the logic is right and nothing about whether it completes. Time
-  it at full volume before it matters.
-- **Batch by an INDEXED key; never one giant transaction.** A single bulk statement over
-  millions of rows holds locks for its whole duration, and its ROLLBACK is slower than the
-  statement was - a failed run can hold locks for hours and block every other writer, which
-  is a bigger outage than the defect you were fixing. Batch, commit, and make each batch
-  independently re-runnable.
-- **Check the join keys are indexed** before running anything that joins at volume. An
-  unindexed join on a large table is the difference between minutes and hours.
-- **Run long operations DETACHED and poll.** Remote-execution channels have their own
-  timeouts; an operation that outlives its channel gets killed mid-write, which is the worst
-  possible moment.
-- **Checkpoint, so a killed run resumes instead of restarting.** Record what has been
-  processed; a transform that must start over from zero after a failure will be run under
-  pressure, and that is when it gets run wrong.
-- **Across two systems, the progress record cannot live with the source.** That forks the
-  problem. If the load can be made IDEMPOTENT on a key observable in the DESTINATION alone
-  - does this row already exist, judged without consulting the source - then resume is
-  cheap: re-run it and the completed rows skip themselves, with no checkpoint state at all.
-  Two conditions, and both must hold or the resume silently loses rows. The existence check
-  must be at the grain of the whole UNIT OF WORK, not of the first row written: a parent
-  inserted ahead of its children makes the parent's presence say "done" while the children are
-  gone, at a clean parent count. And each unit must be written in ONE transaction, so a killed
-  batch leaves it wholly present or wholly absent - existence cannot tell a complete row from
-  one a kill caught half-populated. Where the unit spans tables, key the check on the LAST
-  write and wrap the unit. If it cannot -
-  an UPDATE, or an insert with no natural destination-side key - then it is materially
-  harder, because you must persist which source rows were applied AS A TABLE IN THE
-  DESTINATION. Decide which of those two you are in before the first batch runs.
-- **Watch for column constraints that abort the BATCH, not the row.** An unsigned column
-  meeting a negative value, or a value exceeding a width, can fail the entire statement -
-  clamp or validate before the write, and know which failures are per-row and which are
-  fatal to the batch.
-- **Declare the CHARACTER SET at every hop, the way you declare the columns.** A census of
-  the source cannot detect damage the TRANSFER does: the source column's charset, the client
-  connection's charset, the file's encoding and the load statement's charset clause are four
-  separate settings, and any one left to a default turns an accented character into mojibake
-  or a `?` on the way through. Round-trip one known non-ASCII row end to end over the real
-  channel before the bulk run and compare it BYTE for byte - a terminal rendering both the
-  same is not evidence. That one row proves the channel; after the load, compare every
-  non-ASCII value byte for byte over the full population, because a transform can change
-  the Unicode normalization form (composed to decomposed) of every accented name while the
-  mojibake census stays clean and the screen shows the same letters.
-- **Name the columns in every load statement.** A positional LOAD/COPY silently shears when
-  the file and the table disagree on column order: every value lands, every count
-  reconciles, and each field holds its neighbour's data. Explicit column lists are one
-  line of ceremony against a whole-table defect.
-- **Plan the DELTA before the load, not after.** Everything created in the source after the
-  snapshot is invisible to it (see Reach). Either freeze the source for the window - and
-  say so - or name a delta pass that re-runs this same loop over rows created since, and
-  reconcile AFTER cut-over against the frozen source: that is the one moment both sides
-  are supposed to be equal.
-- **When the extract does not fit the channel, move DIGESTS, not rows.** Build, on each
-  side in its own engine, one digest per row over the normalized mapped columns - the
-  step-5 normalization rule (trim, case, minor units, ISO dates, one fixed token for NULL)
-  written once per dialect and proven on a known row before the bulk - keyed by the join
-  key. Extract (key, digest) only: a few percent of the row width, and it reconciles with
-  `reconcile.columns: ["row_digest"]` unchanged. Pull full rows only for the keys whose
-  digests differ, to classify them. A digest built differently on the two sides reports
-  its own artifact as a total mismatch, which is why the first run compares one row by hand.
-- **Run the census where the data is.** Uniqueness, value domains, sentinels, the
-  counterexample queries and the contradiction counts are single-side queries: run them in
-  the source's own engine and move the RESULTS, which are kilobytes. Only the cross-system
-  comparison needs both sides in one place.
-- **If the source keeps writing during the migration - dual-write, replication, change
-  capture - the loop runs once per sync, and the reconcile needs a common WATERMARK.**
-  Both sides are compared as of the same point: a change marker on the source (an
-  updated-at column, a log position) or a frozen snapshot pair. A source with no change
-  marker has no delta, only a full re-compare; say so before promising a sync cadence. A
-  row changed on BOTH sides since the last sync is a conflict, and which side wins is step
-  2b's business rule, not last-writer.
-
-**Keep schema (DDL) and data (DML) as separate migrations.** They have different risk,
-different rollback, and different rehearsal needs; bundling them means a data defect forces
-a schema rollback. And once a migration has been APPLIED anywhere, treat it as immutable -
-correct it with a new one rather than editing history that other environments already ran.
-
-## Step 6c - a defect found in one row is a CLASS
-
-A migrated row reported wrong is a SIGNATURE, not a scope. Write the predicate that selects
-it - the condition that makes that row wrong - run it over the whole table, and fix every
-match. Closing on the reported row leaves the rest of its class live, and the next report is
-drawn from exactly the population you left behind.
-
-The evidence is that the class is EMPTY: the count of still-matching rows is zero. Not that
-the reported row is now right. If you deliberately fix a subset, that needs sign-off naming
-what is excluded and why, agreed before you close rather than after.
-
-## Step 7 - close out
-
-The receipt is the destination-side evidence, not the run log:
-- the contract asserted, and what the destination does/does not enforce
-- key uniqueness + match-rate against an independent attribute, and the count of rows
-  deferred as ambiguous rather than matched by guess
-- the coverage census (in scope / transformed / skipped + reasons), and the count of rows
-  that took a fallback rather than a mapped value
-- the full-population value reconciliation (mismatch count)
-- spot checks BY VALUE on representative LEGACY and edge rows, not only freshly-created ones
-- the evidence rung each side was on (code / running system / schema only), and which
-  decisions were BLOCKED rather than guessed because of it
-- the migration brief, updated with what this run learned
-
-**The five lines a reviewer reads first.** Whatever else the receipt carries, these are
-checked first, and a missing line is not a shorter receipt - it is a claim without its check:
+Destination-side evidence, not a run log: the contract and what the destination enforces;
+key uniqueness and identity match rate with the deferred count; coverage in scope =
+transformed + skipped + deferred, with columns mapped / dropped / defaulted and the
+fallback count; the full-population reconciliation with mismatches per class explained;
+by-value spot checks on legacy and edge rows; the evidence rung each side was on and which
+decisions were BLOCKED because of it; the brief, updated. The lines a reviewer reads first:
 
 ```
-RECEIPT    <source> -> <destination>   run <date>   build <sha or version>
+RECEIPT    <source> -> <destination>   run <date>   build <sha>
 reach      source via <path>; destination via <path>; write round trip <ok/failed, date>
 evidence   source rung <n>, destination rung <n>; blocked decisions: <n> (<which>)
-keys       <key>: source unique <yes/no, collisions>; identity <rate> vs <attribute>; deferred <n>
-coverage   in scope <n> = transformed <n> + skipped <n> + deferred <n>; columns mapped/dropped/defaulted <a/b/c>
-reconcile  <n> rows compared, <m> mismatches in <k> classes; each class: <transform line + why correct, or OPEN>
-merge      (consolidations) <n> sources: <sum> = landed <n> + merged <n> + skipped <n> + deferred <n>; conflicting merges <n>; split candidates <n>; survivorship declared for <k> fields
+keys       <key>: source unique <yes/no>; identity <rate> vs <attribute>; deferred <n>
+coverage   in scope <n> = transformed <n> + skipped <n> + deferred <n>; columns <a/b/c>
+reconcile  <n> rows compared, <m> mismatches in <k> classes; each: <line + why, or OPEN>
+merge      (consolidations) <sum> = landed + merged + skipped + deferred; conflicts <n>; splits <n>
 ```
 
-A migration that cannot show these has not been verified - it has been run. Take the
-honest downgrade rather than calling it done.
+A migration that cannot show these has not been verified; it has been run. Take the honest
+downgrade rather than calling it done.
 
-## Running the mechanical checks
+## The mechanical checks
 
-Most of this loop is judgment. The mechanical minority is not - each of those checks is a
-query whose answer is a number, and they are executable. Two scripts live beside this file:
-`migration_census.py` for step 0 (the source's mess, as numbers: presence, spellings, id
-shapes, decimals, future dates, dangling links, flag-by-category crosstabs, cross-source
-overlaps; a census, so it never blocks) and `migration_check.py` for the checks that can:
+Two stdlib scripts sit beside this file. `migration_census.py` is step 0 as numbers and
+never blocks. `migration_check.py --spec spec.json` reads CSV, JSONL or JSON extracts (never
+a live connection, so it runs anywhere) and checks: key uniqueness on both sides; identity
+match rate against an independent attribute (threshold 1.0 by default); value
+reconciliation over the full population; column coverage; coverage summation; grain in both
+directions; the destination contract (types, enums, required, ranges, all-NULL); your
+counterexample queries; provenance dates; mutually-exclusive precedence, with affected rows
+the destination never received counted as failures; the evidence rung of every declared
+decision (rung 1 or 2 names its source, rung 3 is blocked with an unblocker, a precedence
+applied through `exclusivity` must rest on rung 1 or 2, and `exclusivity` with no `evidence`
+section fails); and, for consolidations, the merge ledger. An unknown section or key is a
+spec error (exit 2), never a silent skip. Every undeclared section prints as NOT RUN with
+the cost of its absence, because a thin spec looks identical to a thorough one. Exit 0 =
+every declared check passed; 1 = a check failed, which is a block; 2 = invalid spec.
 
-```bash
-python3 migration_check.py --spec spec.json
-```
+Every check that can block has a declared way past it, and declaring one is a recorded
+claim: `key.allow_missing` / `allow_unmatched` (a scoped or phased load), `key.identity.min_match_rate`
+(almost never), `counterexamples[].allow_no_match`, `contract[col].sentinels: false` ("NA" is
+Namibia), `coverage.skipped` / `deferred` (always with the reason), `allow_empty` (almost
+never), `evidence.decisions[].blocked: true` (rung 3 on that side), `merge.allow_same_source_merges`,
+`merge.max_conflicting_merges`, `merge.max_split_candidates`, `merge.allow_destination_only`.
+A number that makes a check unfalsifiable is the same as deleting it, and the output prints
+the value so a reviewer can see which you did. Presence of a decision is enforceable; its
+correctness is not.
 
-Declare only what applies; each section is optional - but what you DECLARE is validated: an
-unknown section, contract type, or rule key is a spec error (exit 2), never a silent skip,
-because a typo'd check is a check that never runs while the run looks green. It checks
-**mutually-exclusive state precedence** (did the transform let the right flag win - and
-every affected row the destination never received is counted and fails, unless an
-`allow_missing` allowance declares the skips deliberate), **key uniqueness on BOTH sides**
-(a natural key mapping N:1, a blank/sentinel key, and - on the destination - a
-double-applied load minting duplicates), **key identity** (match rate against an
-independent attribute, with the threshold explicit in the spec and 1.0 by default),
-**value reconciliation** (the landed values compared against the source row by row over
-the full population - step 5, executable; blank or duplicated destination keys are
-excluded and counted, never resolved last-seen-wins), **column coverage** (every source
-column mapped / dropped / defaulted), **coverage summation** (transformed + skipped +
-deferred must equal the input), **grain** (children-per-parent in both directions,
-catching collapse AND fan-out), the **destination contract** (int/number/ISO-date/enum,
-required, min/max, all-NULL), your **counterexample queries** (an inferred meaning is a
-hypothesis), **provenance** (an artifact older than the data it maps is stale by
-construction - and an entry missing a date, or carrying a non-ISO one, fails rather than
-silently passing), and the **evidence rung** (every declared semantic decision carries the
-intake rung it rests on: a rung-1 or rung-2 decision names its source, a rung-3 one is
-BLOCKED with its unblocker named rather than declared, and a precedence the transform
-applied through `exclusivity` must rest on rung 1 or 2 - with no `evidence` section at
-all, an `exclusivity` spec FAILS, because a precedence with no recorded evidence is a
-guess that prints like a derivation). When several sources feed one destination, the **merge ledger**
-check reads the ledger and the per-source extracts: every source row appears exactly once,
-every merged row has exactly one golden row, same-source merges were declared, and, given an
-independent attribute per source, false-merge candidates fail past a declared allowance while
-false-split candidates are reported and block only on a declared threshold. It is the one
-check not announced as NOT RUN when absent, because a single-source spec has nothing to merge. A declared input with ZERO rows is a block too, unless `allow_empty`
-says it is deliberate - an empty extract is the wrong-WHERE clause wearing a clean run.
+Run the checks BEFORE you trust an extract, in the source's own dialect if you can; the
+script is the backstop. Prefer emitting the same assertions into whatever data-quality
+framework the project already runs, so they outlive the migration.
 
-**It tells you what it did NOT check.** Every section is optional, so a spec declaring
-almost nothing prints an unbroken column of `ok` and looks identical to a thorough run. Each
-undeclared section is therefore printed as `NOT RUN` with the cost of its absence, and the
-summary carries the count. Declining a check is legitimate - many sections do not apply to a
-given migration - but that has to be a visible decision rather than one inferred from silence.
+## What this loop cannot see
 
-That is also the boundary of what any tool can enforce here. It cannot know whether your
-precedence rule is right, whether the census was thorough, or whether the fallback you chose
-is sane. It can only know whether you declared one. **Presence of a decision is enforceable;
-its correctness is not** - and pretending otherwise would be the same green-on-wrong trap the
-rest of this file exists to prevent.
-
-**The escape hatches, and what declaring one costs you.** Every check that can block has a
-declared way past it, because a checker that cannot express a legitimate exception gets
-switched off entirely. Each is a claim you are making, recorded in the output:
-
-| declare | means | use when |
-|---|---|---|
-| `key.allow_missing: N` | up to N source rows legitimately never reached the destination | a scoped or phased load, soft deletes excluded |
-| `key.allow_unmatched: N` | up to N destination rows legitimately have no source row | rows the destination generates itself |
-| `key.identity.min_match_rate` | a match rate below 1.0 is acceptable | almost never - a partial match means some rows are on the wrong entity |
-| `counterexamples[].allow_no_match` | the hypothesis genuinely does not arise in this data | after checking it is not a value mismatch (`"1"` against a column holding `"true"`) |
-| `contract[col].sentinels: false` | this column's sentinel-looking values are real | `"NA"` is Namibia, not "not applicable" |
-| `coverage.skipped` / `deferred` | this many rows were deliberately not transformed | any partial load, always with the reason written down |
-| `evidence.decisions[].blocked: true` | this meaning is NOT declared; the decision waits on the named `unblocked_by` | rung 3 (schema only) on the side that would have to answer it |
-| `merge.allow_same_source_merges: true` | two rows of ONE system were deliberately folded together | intra-source duplicates found in the census and decided there, not discovered by the cross-source match |
-| `merge.max_conflicting_merges: N` | up to N merged groups may disagree on the independent attribute | after each one has been looked at; the default is 0 |
-| `merge.max_split_candidates: N` | block if more than N landed rows share the independent attribute | when the overlap census says the residual duplicate rate should be near zero |
-| `merge.allow_destination_only: N` | up to N destination rows were not produced by the merge | rows the destination generates itself |
-| `allow_empty` | an empty input is expected | almost never - an empty extract passes every check by having nothing to fail |
-
-Declaring one is legitimate. Setting it to a number that makes the check unfalsifiable is the
-same thing as deleting the check, and the output prints the value so a reviewer can see which
-you did.
-
-Exit codes: **0** = every declared check passed; **1** = a check FAILED - a block, because
-the transform is not proven; **2** = the spec itself is invalid. CSV in, so it runs against
-an extract, in CI, or against a fixture with no database driver.
-
-**Run the CHECKS before the extract; the script is a backstop, not the first line.** These
-are a discipline first and a script second, and the moment they pay is BEFORE you trust an
-extract - run them on the source however you can query it, in its own dialect, on whatever
-channel reaches it. Waiting for a CSV inverts the order: by the time you have one you have
-already decided which rows and columns to pull, which is exactly what uniqueness, identity
-and coverage were supposed to inform. That ordering matters most in the case the script
-cannot serve at all - two systems behind different drivers and different channels, where no
-single connection spans both. The script stays deliberately EXTRACT-based for that reason - it reads CSV, JSONL or JSON and never connects to anything. A
-live-connection mode would need a driver per store, would still not span two of them, and
-would cost the property that lets this run anywhere with nothing installed.
-
-`tests/` seeds a fixture with one instance of every defect class above and asserts each is
-caught - plus a CLEAN fixture that must produce ZERO findings. That second half matters as
-much as the first: a checker that cries wolf gets switched off, and then nothing is checked.
-
-**These are the floor, not the ceiling.** They prove the mechanical properties; semantics,
-grain intent and coverage decisions still need the steps above. And prefer emitting the same
-assertions into whatever data-quality framework the project already runs (see below) so they
-outlive the migration.
-
-## Where this sits relative to existing tooling
-
-Published migration tooling, and most ORM tooling, covers **schema mechanics** - DDL,
-expand/contract, zero-downtime cutover, rollback, version ordering - and assumes the data
-itself is clean. That is a different problem from this one, and they compose: use them for
-HOW the schema changes, use this for WHETHER the data that landed is right.
-
-**What this loop cannot see.** It names the defect classes that have already reached
-production somewhere and looked like success. A class it does not name surfaces only as an
-unexplained mismatch class in step 5 or as a report in step 6c, found by a person reading
-the numbers. When that happens the fix is a line in this file, not a bigger sample.
-
-The checks here are not novel in data engineering - assertion frameworks (dbt tests, Great
-Expectations, Soda, data-diff) express exactly these destination-side constraints. Prefer
-EMITTING the contract, uniqueness and reconciliation checks into whichever of those a
-project already runs, rather than writing a bespoke validator: an assertion in the project's
-own test runner survives after the migration is over, and a one-off script does not.
+It names the defect classes that have already reached production somewhere and looked like
+success. A class it does not name surfaces only as an unexplained mismatch class in step 5
+or a report in step 6c, found by a person reading the numbers; when that happens the fix is
+a line in this file, not a bigger sample. Schema-migration tooling (DDL, expand/contract,
+cutover, rollback) is a different problem and composes with this one: use it for HOW the
+schema changes, use this for WHETHER the data that landed is right.
